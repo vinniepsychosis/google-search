@@ -4,30 +4,33 @@ import { Command } from "commander";
 import { googleSearch, getGoogleSearchPageHtml } from "./search.js";
 import { CommandOptions } from "./types.js";
 
-// 获取包信息
+// Get package information
 import packageJson from "../package.json" with { type: "json" };
 
-// 创建命令行程序
+// Create the command line program
 const program = new Command();
 
-// 配置命令行选项
+// Configure command line options
 program
   .name("google-search")
-  .description("基于 Playwright 的 Google 搜索 CLI 工具")
+  .description("Playwright-based Google search CLI tool")
   .version(packageJson.version)
-  .argument("<query>", "搜索关键词")
-  .option("-l, --limit <number>", "结果数量限制", parseInt, 10)
-  .option("-t, --timeout <number>", "超时时间(毫秒)", parseInt, 30000)
-  .option("--no-headless", "已废弃: 现在总是先尝试无头模式，如果遇到人机验证会自动切换到有头模式")
-  .option("--state-file <path>", "浏览器状态文件路径", "./browser-state.json")
-  .option("--no-save-state", "不保存浏览器状态")
-  .option("--get-html", "获取搜索结果页面的原始HTML而不是解析结果")
-  .option("--save-html", "将HTML保存到文件")
-  .option("--html-output <path>", "HTML输出文件路径")
+  .argument("<query>", "Search keywords")
+  // Note: use an explicit radix-10 parser. A bare `parseInt` would receive the
+  // option's default value as its second argument (the radix), corrupting the result.
+  .option("-l, --limit <number>", "Result count limit (fetched across pages as needed)", (v) => parseInt(v, 10), 10)
+  .option("-p, --page <number>", "Starting results page (1-based)", (v) => parseInt(v, 10), 1)
+  .option("-t, --timeout <number>", "Timeout in milliseconds", (v) => parseInt(v, 10), 30000)
+  .option("--no-headless", "Deprecated: headless mode is now always tried first, automatically switching to headed mode if a CAPTCHA is encountered")
+  .option("--state-file <path>", "Browser state file path", "./browser-state.json")
+  .option("--no-save-state", "Do not save browser state")
+  .option("--get-html", "Get the raw HTML of the search result page instead of parsing results")
+  .option("--save-html", "Save the HTML to a file")
+  .option("--html-output <path>", "HTML output file path")
   .action(async (query: string, options: CommandOptions & { getHtml?: boolean, saveHtml?: boolean, htmlOutput?: string }) => {
     try {
       if (options.getHtml) {
-        // 获取HTML
+        // Get HTML
         const htmlResult = await getGoogleSearchPageHtml(
           query,
           options,
@@ -35,36 +38,36 @@ program
           options.htmlOutput
         );
 
-        // 如果保存了HTML到文件，在输出中包含文件路径信息
+        // If the HTML was saved to a file, include the file path in the output
         if (options.saveHtml && htmlResult.savedPath) {
-          console.log(`HTML已保存到文件: ${htmlResult.savedPath}`);
+          console.log(`HTML saved to file: ${htmlResult.savedPath}`);
         }
 
-        // 输出结果（不包含完整HTML，避免控制台输出过多）
+        // Output the result (without the full HTML, to avoid excessive console output)
         const outputResult = {
           query: htmlResult.query,
           url: htmlResult.url,
-          originalHtmlLength: htmlResult.originalHtmlLength, // 原始HTML长度（包含CSS和JavaScript）
-          cleanedHtmlLength: htmlResult.html.length, // 清理后的HTML长度（不包含CSS和JavaScript）
+          originalHtmlLength: htmlResult.originalHtmlLength, // Original HTML length (including CSS and JavaScript)
+          cleanedHtmlLength: htmlResult.html.length, // Cleaned HTML length (without CSS and JavaScript)
           savedPath: htmlResult.savedPath,
-          screenshotPath: htmlResult.screenshotPath, // 网页截图保存路径
-          // 只输出HTML的前500个字符作为预览
+          screenshotPath: htmlResult.screenshotPath, // Page screenshot save path
+          // Only output the first 500 characters of the HTML as a preview
           htmlPreview: htmlResult.html.substring(0, 500) + (htmlResult.html.length > 500 ? '...' : '')
         };
-        
+
         console.log(JSON.stringify(outputResult, null, 2));
       } else {
-        // 执行常规搜索
+        // Perform a regular search
         const results = await googleSearch(query, options);
-        
-        // 输出结果
+
+        // Output the results
         console.log(JSON.stringify(results, null, 2));
       }
     } catch (error) {
-      console.error("错误:", error);
+      console.error("Error:", error);
       process.exit(1);
     }
   });
 
-// 解析命令行参数
+// Parse command line arguments
 program.parse(process.argv);
