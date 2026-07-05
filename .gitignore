@@ -39,3 +39,6 @@ google-search-html/
 
 # npm lockfile (this project uses pnpm)
 package-lock.json
+
+# Makefile-managed API pid file
+.api.pid
