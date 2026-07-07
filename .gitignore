@@ -1,13 +1,13 @@
-# 依赖目录
+# Dependency directories
 node_modules/
 .pnpm-store/
 
-# 编译输出
+# Build output
 dist/
 build/
 lib/
 
-# 日志
+# Logs
 logs
 *.log
 npm-debug.log*
@@ -15,24 +15,35 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# 环境变量
+# Environment variables
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
 
-# 编辑器目录和文件
+# Editor directories and files
 .idea/
 .vscode/
 *.swp
 *.swo
 .DS_Store
 
-# 浏览器状态文件
+# Browser state files (base + per-engine: -bing, -brave, -duckduckgo, *-fingerprint)
 browser-state.json
 browser-state-fingerprint.json
+browser-state-*.json
+
+# Ad-hoc CLI output dumps
+output.json
+results.json
 src/mcp-server.ts
 .iter_plan.md
 .iter_process.md
 google-search-html/
+
+# npm lockfile (this project uses pnpm)
+package-lock.json
+
+# Makefile-managed API pid file
+.api.pid

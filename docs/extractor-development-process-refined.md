@@ -1,40 +1,40 @@
-# Google搜索结果提取器开发流程 (精简版)
+# Google Search Results Extractor Development Process (Condensed Version)
 
-本文档概述了从分析Google搜索结果HTML到实现可靠提取器的核心步骤。
+This document outlines the core steps for going from analyzing Google search results HTML to implementing a reliable extractor.
 
-## 1. 理解目标与现有代码
+## 1. Understand the Goal and Existing Code
 
-*   **目标**: 从Google搜索结果HTML中准确提取标题、链接和摘要信息。
-*   **起点**: 查看目标HTML文件（例如 `google-search-html/test_search-*.html`）的结构，并参考项目中已有的提取逻辑（如 `src/search.ts`），了解基本需求和现有实现。
+*   **Goal**: Accurately extract titles, links, and snippet information from Google search results HTML.
+*   **Starting Point**: Examine the structure of the target HTML files (e.g., `google-search-html/test_search-*.html`), and refer to the project's existing extraction logic (such as `src/search.ts`) to understand the basic requirements and current implementation.
 
-## 2. 选择分析工具
+## 2. Choose Analysis Tools
 
-*   **工具**: 使用 `jsdom` 库在Node.js环境中模拟浏览器DOM，以便通过编程方式查询和分析HTML结构。这是分析HTML的关键工具。
+*   **Tool**: Use the `jsdom` library to simulate a browser DOM in a Node.js environment, so that you can programmatically query and analyze the HTML structure. This is the key tool for analyzing HTML.
 
-## 3. 分析HTML结构与确定选择器
+## 3. Analyze the HTML Structure and Determine Selectors
 
-*   **分析**: 利用 `jsdom` 编写脚本（如 `analyze-search-results.cjs`）来系统地检查HTML结构。
-    *   **探测容器**: 识别包含单个搜索结果的父元素。
-    *   **定位元素**: 在容器内定位标题、链接和摘要元素。
-    *   **识别模式**: 找出最可靠的CSS选择器组合来唯一地标识这些元素。
-*   **决策**: 根据分析结果，确定用于提取的最佳选择器组合。
+*   **Analysis**: Use `jsdom` to write a script (such as `analyze-search-results.cjs`) to systematically inspect the HTML structure.
+    *   **Probe Containers**: Identify the parent element that contains a single search result.
+    *   **Locate Elements**: Locate the title, link, and snippet elements within the container.
+    *   **Identify Patterns**: Find the most reliable combination of CSS selectors to uniquely identify these elements.
+*   **Decision**: Based on the analysis results, determine the best combination of selectors to use for extraction.
 
-## 4. 实现提取逻辑与去重
+## 4. Implement the Extraction Logic and Deduplication
 
-*   **实现**: 基于确定的选择器，编写提取函数（如 `extractSearchResults`）。
-    *   **核心逻辑**: 遍历所有匹配的容器元素，使用确定的选择器提取每个结果的标题、链接和摘要。
-    *   **去重**: 实现去重机制（例如，使用 `Set` 存储已见过的链接URL）以确保结果的唯一性。
-*   **测试**: 编写测试脚本（如 `test-extraction.cjs`）来验证提取逻辑的准确性和去重效果。根据测试结果进行调整。
+*   **Implementation**: Based on the chosen selectors, write an extraction function (such as `extractSearchResults`).
+    *   **Core Logic**: Iterate over all matching container elements, using the chosen selectors to extract the title, link, and snippet of each result.
+    *   **Deduplication**: Implement a deduplication mechanism (for example, using a `Set` to store link URLs that have already been seen) to ensure the uniqueness of the results.
+*   **Testing**: Write a test script (such as `test-extraction.cjs`) to verify the accuracy of the extraction logic and the effectiveness of the deduplication. Adjust based on the test results.
 
-## 5. 封装成可复用模块
+## 5. Package Into a Reusable Module
 
-*   **封装**: 将经过验证的提取逻辑封装成一个独立的、可复用的Node.js模块（如 `google-search-extractor.cjs`）。
-*   **接口**: 定义清晰的接口（例如，一个接收HTML并返回提取结果的函数），方便在项目中使用。
+*   **Packaging**: Package the validated extraction logic into a standalone, reusable Node.js module (such as `google-search-extractor.cjs`).
+*   **Interface**: Define a clear interface (for example, a function that accepts HTML and returns the extraction results) to make it easy to use within the project.
 
-## 6. 集成与使用
+## 6. Integration and Usage
 
-*   **集成**: 将封装好的模块引入到主项目（如 `search.ts`）中。
-*   **使用**: 在需要提取Google搜索结果的地方，调用模块提供的函数，传入HTML内容，获取结构化的结果数据。
-*   **示例**: 可以创建一个示例脚本（如 `integration-test.cjs`）来演示如何在项目中集成和使用该模块。
+*   **Integration**: Import the packaged module into the main project (such as `search.ts`).
+*   **Usage**: Wherever you need to extract Google search results, call the function provided by the module, pass in the HTML content, and obtain structured result data.
+*   **Example**: You can create an example script (such as `integration-test.cjs`) to demonstrate how to integrate and use this module within the project.
 
-这个精简流程突出了从分析到实现的关键步骤，省略了具体脚本编写的细节，更侧重于方法论和最终成果的产出。
+This condensed process highlights the key steps from analysis to implementation, omitting the details of writing specific scripts, and focuses more on the methodology and the final deliverables.

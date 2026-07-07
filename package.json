@@ -1,7 +1,7 @@
 {
   "name": "google-search-cli",
   "version": "1.0.0",
-  "description": "基于 Playwright 的 Google 搜索 CLI 工具",
+  "description": "Playwright-based Google search CLI tool",
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist//src/index.d.ts",
@@ -21,7 +21,9 @@
     "link": "npm link",
     "clean": "node -e \"const fs = require('fs'); const path = require('path'); if (fs.existsSync('dist')) fs.rmSync('dist', { recursive: true, force: true });\"",
     "mcp": "ts-node src/mcp-server.ts",
-    "mcp:build": "npm run build && node dist/src/mcp-server.js"
+    "mcp:build": "npm run build && node dist/src/mcp-server.js",
+    "api": "ts-node src/api-server.ts",
+    "api:build": "npm run build && node dist/src/api-server.js"
   },
   "repository": {
     "type": "git",
@@ -43,17 +45,21 @@
   "author": "web-agent-master",
   "license": "ISC",
   "devDependencies": {
+    "@types/express": "^5.0.0",
     "@types/node": "^22.13.9",
+    "jsdom": "^26.0.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.8.2",
-    "jsdom": "^26.0.0"
+    "typescript": "^5.8.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.6.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^13.1.0",
+    "express": "^5.1.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
     "playwright": "^1.50.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "zod": "^3.22.4"
   },
   "engines": {
