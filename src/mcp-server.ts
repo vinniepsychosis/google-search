@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { googleSearch, getGoogleSearchPageHtml } from "./search.js";
+import { search } from "./engines.js";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
@@ -22,6 +22,7 @@ const server = new McpServer({
 // Structured output schema for the search tool (mirrors SearchResponse)
 const searchOutputSchema = {
   query: z.string(),
+  engine: z.string().optional().describe("Engine that produced these results"),
   results: z
     .array(
       z.object({
@@ -61,6 +62,10 @@ server.registerTool(
     description:
       "Use the Google search engine to query real-time web information, returning search results with titles, links, and snippets. Suitable for scenarios that require the latest information, finding material on a specific topic, researching current events, or verifying facts. Returns structured results including position, domain, snippets, and (when available) 'People also ask' and 'Related searches'.",
     inputSchema: {
+      engine: z
+        .enum(["google", "bing", "duckduckgo", "brave"])
+        .optional()
+        .describe("Search engine to use (default: google). Use others as fallback if Google is blocked."),
       query: z
         .string()
         .describe(
@@ -83,8 +88,8 @@ server.registerTool(
   },
   async (params) => {
     try {
-      const { query, limit, page, timeout } = params;
-      logger.info({ query, limit, page }, "Performing Google search");
+      const { query, engine, limit, page, timeout } = params;
+      logger.info({ query, engine, limit, page }, "Performing search");
 
       // Get the state file path in the user's home directory
       const stateFilePath = path.join(
@@ -106,9 +111,10 @@ server.registerTool(
       }
 
       // Perform the search using the global browser instance
-      const results = await googleSearch(
+      const results = await search(
         query,
         {
+          engine: engine,
           limit: limit,
           page: page,
           timeout: timeout,

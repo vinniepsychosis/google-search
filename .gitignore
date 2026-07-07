@@ -29,9 +29,14 @@ pnpm-debug.log*
 *.swo
 .DS_Store
 
-# Browser state files
+# Browser state files (base + per-engine: -bing, -brave, -duckduckgo, *-fingerprint)
 browser-state.json
 browser-state-fingerprint.json
+browser-state-*.json
+
+# Ad-hoc CLI output dumps
+output.json
+results.json
 src/mcp-server.ts
 .iter_plan.md
 .iter_process.md

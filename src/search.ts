@@ -6,7 +6,7 @@ import * as os from "os";
 import logger from "./logger.js";
 
 // Fingerprint configuration interface
-interface FingerprintConfig {
+export interface FingerprintConfig {
   deviceName: string;
   locale: string;
   timezoneId: string;
@@ -16,7 +16,7 @@ interface FingerprintConfig {
 }
 
 // Saved state file interface
-interface SavedState {
+export interface SavedState {
   fingerprint?: FingerprintConfig;
   googleDomain?: string;
 }
@@ -26,7 +26,7 @@ interface SavedState {
  * @param userLocale User-specified locale (if any)
  * @returns Fingerprint configuration based on the host machine
  */
-function getHostMachineConfig(userLocale?: string): FingerprintConfig {
+export function getHostMachineConfig(userLocale?: string): FingerprintConfig {
   // Get the system locale
   const systemLocale = userLocale || process.env.LANG || "zh-CN";
 

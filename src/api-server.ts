@@ -4,8 +4,9 @@ import express, { Request, Response, NextFunction } from "express";
 import * as os from "os";
 import * as path from "path";
 import { chromium, Browser } from "playwright";
-import { googleSearch, getGoogleSearchPageHtml } from "./search.js";
-import { CommandOptions } from "./types.js";
+import { getGoogleSearchPageHtml } from "./search.js";
+import { search, SUPPORTED_ENGINES } from "./engines.js";
+import { CommandOptions, SearchEngine } from "./types.js";
 import logger from "./logger.js";
 
 // A single shared browser instance reused across requests. Each request gets its
@@ -58,8 +59,14 @@ function toPositiveInt(value: unknown, fallback: number): number {
 /**
  * Build search options from a request's merged query + body parameters.
  */
+function toEngine(value: unknown): SearchEngine {
+  const e = typeof value === "string" ? value.toLowerCase() : "";
+  return (SUPPORTED_ENGINES as string[]).includes(e) ? (e as SearchEngine) : "google";
+}
+
 function optionsFromParams(source: Record<string, unknown>): CommandOptions {
   const options: CommandOptions = {
+    engine: toEngine(source.engine),
     limit: toPositiveInt(source.limit, 10),
     page: toPositiveInt(source.page, 1),
     timeout: toPositiveInt(source.timeout, 30000),
@@ -103,7 +110,8 @@ async function handleSearch(req: Request, res: Response): Promise<void> {
   const options = optionsFromParams(merged);
 
   try {
-    const results = await googleSearch(query.trim(), options, globalBrowser);
+    // Google reuses the shared anti-bot browser; other engines manage their own context.
+    const results = await search(query.trim(), options, globalBrowser);
     res.json(results);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

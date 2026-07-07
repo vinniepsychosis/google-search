@@ -39,6 +39,8 @@ export interface PaginationInfo {
  */
 export interface SearchResponse {
   query: string;
+  /** Engine that produced these results. */
+  engine?: SearchEngine;
   results: SearchResult[];
   /** "People also ask" questions surfaced on the results page (best-effort) */
   peopleAlsoAsk?: string[];
@@ -48,10 +50,15 @@ export interface SearchResponse {
   pagination?: PaginationInfo;
 }
 
+/** Supported search engines. */
+export type SearchEngine = "google" | "bing" | "duckduckgo" | "brave";
+
 /**
  * Command line / programmatic options interface
  */
 export interface CommandOptions {
+  /** Search engine to use. Default "google". */
+  engine?: SearchEngine;
   /** Maximum number of results to return (across pages). Default 10. */
   limit?: number;
   /** Starting page (1-based). Default 1. Combined with limit to compute the start offset. */
@@ -61,6 +68,21 @@ export interface CommandOptions {
   stateFile?: string;
   noSaveState?: boolean;
   locale?: string; // Search result language, defaults to Chinese (zh-CN)
+  /**
+   * Opt-in: if a non-Google engine still throws an anti-bot challenge in
+   * headless mode, open a visible browser window for a one-time manual solve.
+   * Default false — the tool stays fully headless and surfaces a challenge as an
+   * error instead of popping a window.
+   */
+  headedSolve?: boolean;
+  /**
+   * Deliberate one-time solve. Skips the doomed headless retries and opens a
+   * headed window immediately so you can clear an *active* challenge (e.g.
+   * Brave's "verify you're not a bot"). The resulting clearance cookie is
+   * persisted to the engine's state file, after which normal headless runs
+   * reuse it. Requires state saving (incompatible with noSaveState).
+   */
+  solveChallenge?: boolean;
 }
 
 /**
