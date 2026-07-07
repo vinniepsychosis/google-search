@@ -6,8 +6,13 @@ import { googleSearch } from "./search.js";
 import { createStealthSession, launchStealthBrowser } from "./stealth.js";
 import logger from "./logger.js";
 
+/** A real, single search engine (everything except the "all" meta-engine). */
+type RealEngine = Exclude<SearchEngine, "all">;
+/** A real non-Google engine — the ones the multi-engine driver handles. */
+type OtherEngine = Exclude<SearchEngine, "google" | "all">;
+
 interface EngineDef {
-  id: Exclude<SearchEngine, "google">;
+  id: OtherEngine;
   label: string;
   perPage: number;
   /** Homepage visited first to establish cookies (warm-up), like a real user. */
@@ -40,7 +45,7 @@ interface EngineDef {
   };
 }
 
-const ENGINE_DEFS: Record<Exclude<SearchEngine, "google">, EngineDef> = {
+const ENGINE_DEFS: Record<OtherEngine, EngineDef> = {
   bing: {
     id: "bing",
     label: "Bing",
@@ -275,7 +280,7 @@ function domainOf(link: string): string {
  */
 async function searchOtherEngine(
   query: string,
-  engine: Exclude<SearchEngine, "google">,
+  engine: OtherEngine,
   options: CommandOptions,
   // Engines always launch their own stealth browser (the plugin's evasions must
   // be present on every page), so a shared vanilla browser can't be reused here.
@@ -601,11 +606,160 @@ async function searchOtherEngine(
   throw blockError();
 }
 
-export const SUPPORTED_ENGINES: SearchEngine[] = ["google", "bing", "duckduckgo", "brave"];
+export const SUPPORTED_ENGINES: SearchEngine[] = ["google", "bing", "duckduckgo", "brave", "all"];
+
+/** Real engines the "all" meta-engine queries, in priority order (used as the
+ * tie-breaker when two engines rank a shared URL identically). */
+const AGGREGATE_ENGINES: RealEngine[] = ["google", "bing", "duckduckgo", "brave"];
+
+/**
+ * Normalize a URL for cross-engine dedup: drop the fragment and common tracking
+ * params, lowercase the host, strip a leading "www." and any trailing slash.
+ * Two links that normalize equal are treated as the same result.
+ */
+function normalizeLink(link: string): string {
+  try {
+    const u = new URL(link);
+    u.hash = "";
+    for (const p of [
+      "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+      "ref", "fbclid", "gclid", "mc_cid", "mc_eid",
+    ]) {
+      u.searchParams.delete(p);
+    }
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    const path = u.pathname.replace(/\/+$/, "");
+    const search = u.search ? u.search : "";
+    return `${u.protocol}//${host}${path}${search}`.toLowerCase();
+  } catch {
+    return link.toLowerCase();
+  }
+}
+
+/**
+ * Meta-engine: query every real engine in parallel and merge their results into
+ * one deduped, ranked list. Ranking rewards cross-engine consensus — a URL that
+ * several engines returned outranks one only a single engine found — with each
+ * URL's best (lowest) position across engines as the tie-breaker. Resilient: an
+ * engine that fails (e.g. Brave without a valid clearance cookie) is recorded in
+ * `enginesFailed` and simply omitted, as long as at least one engine succeeds.
+ */
+async function searchAllEngines(
+  query: string,
+  options: CommandOptions,
+  existingBrowser?: Browser
+): Promise<SearchResponse> {
+  const limit = options.limit ?? 10;
+
+  interface Merged {
+    title: string;
+    link: string;
+    domain: string;
+    snippet: string;
+    sources: SearchEngine[];
+    bestPosition: number;
+  }
+
+  logger.info({ engines: AGGREGATE_ENGINES, limit }, "Aggregate search across all engines");
+
+  // Fetch `limit` from each engine so the merged pool is rich; slice to `limit`
+  // after ranking. Google reuses the shared browser (API path); the rest launch
+  // their own stealth browsers. allSettled so one blocked engine can't fail all.
+  const settled = await Promise.allSettled(
+    AGGREGATE_ENGINES.map((e) =>
+      search(
+        query,
+        { ...options, engine: e },
+        e === "google" ? existingBrowser : undefined
+      )
+    )
+  );
+
+  const merged = new Map<string, Merged>();
+  const enginesUsed: SearchEngine[] = [];
+  const enginesFailed: { engine: SearchEngine; error: string }[] = [];
+
+  settled.forEach((res, i) => {
+    const eng = AGGREGATE_ENGINES[i];
+    if (res.status === "rejected") {
+      const error = res.reason instanceof Error ? res.reason.message : String(res.reason);
+      enginesFailed.push({ engine: eng, error });
+      logger.warn({ engine: eng, error }, "Engine failed during aggregate search (skipped)");
+      return;
+    }
+    enginesUsed.push(eng);
+    for (const r of res.value.results) {
+      const key = normalizeLink(r.link);
+      const existing = merged.get(key);
+      if (existing) {
+        if (!existing.sources.includes(eng)) existing.sources.push(eng);
+        existing.bestPosition = Math.min(existing.bestPosition, r.position);
+        // Keep the richest snippet / a non-empty title across engines.
+        if ((r.snippet?.length || 0) > (existing.snippet?.length || 0)) existing.snippet = r.snippet;
+        if (!existing.title && r.title) existing.title = r.title;
+      } else {
+        merged.set(key, {
+          title: r.title,
+          link: r.link,
+          domain: r.domain,
+          snippet: r.snippet,
+          sources: [eng],
+          bestPosition: r.position,
+        });
+      }
+    }
+  });
+
+  // Every engine failed → surface a real error so the caller (API) returns 502.
+  if (enginesUsed.length === 0) {
+    throw new Error(
+      `All engines failed for aggregate search: ` +
+        enginesFailed.map((f) => `${f.engine} (${f.error})`).join("; ")
+    );
+  }
+
+  const priority = (e: SearchEngine) => AGGREGATE_ENGINES.indexOf(e as RealEngine);
+  const ranked = [...merged.values()].sort(
+    (a, b) =>
+      b.sources.length - a.sources.length || // more engines agreed → higher
+      a.bestPosition - b.bestPosition || // else best rank across engines
+      priority(a.sources[0]) - priority(b.sources[0]) // stable tie-break
+  );
+
+  const results: SearchResult[] = ranked.slice(0, limit).map((m, i) => ({
+    position: i + 1,
+    title: m.title,
+    link: m.link,
+    domain: m.domain,
+    snippet: m.snippet,
+    sources: m.sources,
+  }));
+
+  logger.info(
+    { unique: merged.size, returned: results.length, enginesUsed, enginesFailed: enginesFailed.map((f) => f.engine) },
+    "Aggregate search complete"
+  );
+
+  return {
+    query,
+    engine: "all",
+    results,
+    enginesUsed,
+    enginesFailed,
+    pagination: {
+      page: 1,
+      requestedLimit: limit,
+      returned: results.length,
+      pagesFetched: enginesUsed.length,
+      hasMore: merged.size > results.length,
+    },
+  };
+}
 
 /**
  * Engine-agnostic entry point. Routes "google" to the existing anti-bot Google
- * implementation and everything else to the multi-engine driver.
+ * implementation, "all" to the parallel aggregator, and everything else to the
+ * multi-engine driver.
  */
 export async function search(
   query: string,
@@ -613,6 +767,9 @@ export async function search(
   existingBrowser?: Browser
 ): Promise<SearchResponse> {
   const engine = (options.engine || "google") as SearchEngine;
+  if (engine === "all") {
+    return searchAllEngines(query, options, existingBrowser);
+  }
   if (engine === "google") {
     const resp = await googleSearch(query, options, existingBrowser);
     return { engine: "google", ...resp };
@@ -622,5 +779,5 @@ export async function search(
       `Unsupported engine "${engine}". Supported: ${SUPPORTED_ENGINES.join(", ")}`
     );
   }
-  return searchOtherEngine(query, engine as Exclude<SearchEngine, "google">, options, existingBrowser);
+  return searchOtherEngine(query, engine as OtherEngine, options, existingBrowser);
 }

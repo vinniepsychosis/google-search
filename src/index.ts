@@ -21,7 +21,7 @@ program
   .argument("<query>", "Search keywords")
   // Note: use an explicit radix-10 parser. A bare `parseInt` would receive the
   // option's default value as its second argument (the radix), corrupting the result.
-  .option("-e, --engine <engine>", "Search engine: google | bing | duckduckgo | brave", "google")
+  .option("-e, --engine <engine>", "Search engine: google | bing | duckduckgo | brave | all (parallel + merged)", "google")
   .option("-l, --limit <number>", "Result count limit (fetched across pages as needed)", (v) => parseInt(v, 10), 10)
   .option("-p, --page <number>", "Starting results page (1-based)", (v) => parseInt(v, 10), 1)
   .option("-t, --timeout <number>", "Timeout in milliseconds", (v) => parseInt(v, 10), 30000)

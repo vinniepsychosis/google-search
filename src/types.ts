@@ -9,6 +9,12 @@ export interface SearchResult {
   /** Hostname of the result link, e.g. "example.com" */
   domain: string;
   snippet: string;
+  /**
+   * Which engines surfaced this URL. Only set for aggregated (engine=all)
+   * results; a URL returned by several engines is merged into one entry and
+   * ranked partly by how many engines agreed on it.
+   */
+  sources?: SearchEngine[];
 }
 
 /**
@@ -48,10 +54,17 @@ export interface SearchResponse {
   relatedSearches?: string[];
   /** Pagination metadata */
   pagination?: PaginationInfo;
+  /** For engine=all: which engines contributed results to this response. */
+  enginesUsed?: SearchEngine[];
+  /** For engine=all: engines that failed (e.g. blocked) and were skipped. */
+  enginesFailed?: { engine: SearchEngine; error: string }[];
 }
 
-/** Supported search engines. */
-export type SearchEngine = "google" | "bing" | "duckduckgo" | "brave";
+/**
+ * Supported search engines. "all" is a meta-engine that queries the real
+ * engines in parallel and merges their results into one deduped ranked list.
+ */
+export type SearchEngine = "google" | "bing" | "duckduckgo" | "brave" | "all";
 
 /**
  * Command line / programmatic options interface

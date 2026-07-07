@@ -30,15 +30,16 @@ CLI flags: `--limit <n>`, `--page <n>` (1-based), `--timeout <ms>`, `--get-html`
 ## HTTP API (src/api-server.ts)
 
 - `GET /health`
-- `GET /search?q=...&limit=10&page=1&timeout=30000`
-- `POST /search` `{ "query", "limit", "page", "timeout" }`
+- `GET /search?q=...&engine=google&limit=10&page=1&timeout=30000` (`engine`: google|bing|duckduckgo|brave|all)
+- `POST /search` `{ "query", "engine", "limit", "page", "timeout" }`
 - `GET /html?q=...&save=true`
 - Env: `PORT` (default 3000), `HOST` (default 0.0.0.0).
 - Uses one shared browser; each request gets its own context (closed after use).
 
 ## Architecture notes
 
-- `src/engines.ts` — engine-agnostic `search()` entry point. Routes `google` to `googleSearch()`; routes `bing`/`duckduckgo`/`brave` to `searchOtherEngine()` (shared pagination loop, block detection, per-engine extractors, same rich-result schema). CLI/MCP/API all call `search()`.
+- `src/engines.ts` — engine-agnostic `search()` entry point. Routes `google` to `googleSearch()`; routes `bing`/`duckduckgo`/`brave` to `searchOtherEngine()` (shared pagination loop, block detection, per-engine extractors, same rich-result schema); routes `all` to `searchAllEngines()`. CLI/MCP/API all call `search()`.
+- **`engine=all` (meta-engine):** queries every engine in parallel (`Promise.allSettled`), merges + dedupes by normalized URL, and ranks by cross-engine consensus (more engines agreeing → higher; best position as tie-break). Each result carries a `sources: SearchEngine[]`; the response adds `enginesUsed[]` / `enginesFailed[]`. Resilient — a blocked engine is skipped, not fatal, unless *all* fail.
 - `src/stealth.ts` — anti-bot layer for the non-Google engines, built on **`playwright-extra` + `puppeteer-extra-plugin-stealth`**. `launchStealthBrowser()` registers the plugin once and launches bundled Chromium (portable); `createStealthSession()` sets a plausible desktop context (viewport/locale/timezone) + cookie persistence and injects **no** manual init-scripts. This replaced the old hand-rolled `navigator.webdriver`/`window.chrome`/WebGL overrides, whose *inconsistency* was exactly what tripped Bing's anti-bot on the pagination request.
 - **Engine status:** Google ✅, Bing ✅ (headless multi-page, no IP cooldown, via homepage human-flow + click-Next), DuckDuckGo ✅. Brave ✅ **after a one-time solve** — it runs an *active* Turnstile-style "verify you're not a bot" challenge that can't be cleared headless, so run `--engine brave --solve` once (opens a headed window; click Verify), which saves the `search.brave.com` clearance cookie; headless Brave then works (multi-page verified) until the cookie expires. `--engine <google|bing|duckduckgo|brave>`. Solve options: `--solve` (deliberate: skips headless retries, straight to a headed window, and redirects the default state file to the shared `~/.google-search-browser-state.json` so the API/MCP servers reuse the clearance); `--headed-solve` (auto-fallback to headed only after headless retries fail). `DEBUG_BLOCK=1` logs anti-bot signature matches.
 - `src/search.ts` — `googleSearch()` (paginates via `&start=`, cross-page dedup, rich results with `position`/`domain`, best-effort `peopleAlsoAsk`/`relatedSearches`) and `getGoogleSearchPageHtml()`. **Throws** on real failure (no fake "Search failed" result).

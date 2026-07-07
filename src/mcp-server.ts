@@ -63,9 +63,9 @@ server.registerTool(
       "Use the Google search engine to query real-time web information, returning search results with titles, links, and snippets. Suitable for scenarios that require the latest information, finding material on a specific topic, researching current events, or verifying facts. Returns structured results including position, domain, snippets, and (when available) 'People also ask' and 'Related searches'.",
     inputSchema: {
       engine: z
-        .enum(["google", "bing", "duckduckgo", "brave"])
+        .enum(["google", "bing", "duckduckgo", "brave", "all"])
         .optional()
-        .describe("Search engine to use (default: google). Use others as fallback if Google is blocked."),
+        .describe("Search engine to use (default: google). Use others as fallback if Google is blocked. 'all' queries every engine in parallel and merges the results into one deduped list (each result carries a `sources` array)."),
       query: z
         .string()
         .describe(
