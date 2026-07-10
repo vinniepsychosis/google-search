@@ -1,51 +1,20 @@
 #!/usr/bin/env node
 
 import express, { Request, Response, NextFunction } from "express";
-import * as os from "os";
-import * as path from "path";
-import { chromium, Browser } from "playwright";
-import { googleSearch, getGoogleSearchPageHtml } from "./search.js";
+import { googleSearch, getGoogleSearchPageHtml, DEFAULT_STATE_FILE } from "./search.js";
 import { CommandOptions } from "./types.js";
 import logger from "./logger.js";
 
-// A single shared browser instance reused across requests. Each request gets its
-// own browser context inside googleSearch(), so requests stay isolated.
-let globalBrowser: Browser | undefined = undefined;
-
-// State file shared by all requests (persists anti-bot fingerprint/session)
-const stateFilePath = path.join(
-  os.homedir(),
-  ".google-search-browser-state.json"
-);
-
-// Chromium launch arguments tuned to avoid automation detection
-const launchArgs = [
-  "--disable-blink-features=AutomationControlled",
-  "--disable-features=IsolateOrigins,site-per-process",
-  "--disable-site-isolation-trials",
-  "--disable-web-security",
-  "--no-sandbox",
-  "--disable-setuid-sandbox",
-  "--disable-dev-shm-usage",
-  "--disable-accelerated-2d-canvas",
-  "--no-first-run",
-  "--no-zygote",
-  "--disable-gpu",
-  "--hide-scrollbars",
-  "--mute-audio",
-  "--disable-background-networking",
-  "--disable-background-timer-throttling",
-  "--disable-backgrounding-occluded-windows",
-  "--disable-breakpad",
-  "--disable-component-extensions-with-background-pages",
-  "--disable-extensions",
-  "--disable-features=TranslateUI",
-  "--disable-ipc-flooding-protection",
-  "--disable-renderer-backgrounding",
-  "--enable-features=NetworkService,NetworkServiceInProcess",
-  "--force-color-profile=srgb",
-  "--metrics-recording-only",
-];
+// Each request gets its OWN fresh browser (launched + closed inside googleSearch).
+// A shared long-lived browser was used before; it's dropped here to match the CLI
+// path and is deferred to the Tier-3 context-pool work.
+//
+// IMPORTANT: this server cannot solve CAPTCHAs (no human, and headed fallback is
+// disabled via GOOGLE_SEARCH_NO_HEADED). It therefore depends on a WARM anti-bot
+// session in DEFAULT_STATE_FILE. That file is shared with the CLI, so running the
+// CLI once (which can fall back to headed mode to solve the first CAPTCHA) seeds
+// the session for this server. A cold/stale state file → CAPTCHA on every request.
+const stateFilePath = DEFAULT_STATE_FILE;
 
 /**
  * Parse a positive integer query/body parameter, falling back to a default.
@@ -81,7 +50,6 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
-    browserReady: Boolean(globalBrowser),
     uptimeSeconds: Math.round(process.uptime()),
   });
 });
@@ -103,7 +71,8 @@ async function handleSearch(req: Request, res: Response): Promise<void> {
   const options = optionsFromParams(merged);
 
   try {
-    const results = await googleSearch(query.trim(), options, globalBrowser);
+    // No third arg: googleSearch launches and closes its own fresh browser.
+    const results = await googleSearch(query.trim(), options);
     res.json(results);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -164,19 +133,6 @@ async function main() {
   const port = toPositiveInt(process.env.PORT, 3000);
   const host = process.env.HOST || "0.0.0.0";
 
-  try {
-    logger.info("Initializing the shared browser instance...");
-    globalBrowser = await chromium.launch({
-      headless: true,
-      args: launchArgs,
-      ignoreDefaultArgs: ["--enable-automation"],
-    });
-    logger.info("Shared browser instance initialized successfully");
-  } catch (error) {
-    logger.error({ error }, "Failed to initialize the browser; exiting");
-    process.exit(1);
-  }
-
   const server = app.listen(port, host, () => {
     logger.info({ host, port }, "Google Search API server listening");
     // Also print to stdout for convenience when run directly
@@ -184,28 +140,14 @@ async function main() {
   });
 
   // Graceful shutdown
-  const shutdown = async (signal: string) => {
+  const shutdown = (signal: string) => {
     logger.info({ signal }, "Shutting down API server...");
     server.close();
-    await cleanupBrowser();
     process.exit(0);
   };
 
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-}
-
-async function cleanupBrowser() {
-  if (globalBrowser) {
-    logger.info("Closing the shared browser instance...");
-    try {
-      await globalBrowser.close();
-      globalBrowser = undefined;
-      logger.info("Shared browser instance closed");
-    } catch (error) {
-      logger.error({ error }, "Error while closing the browser instance");
-    }
-  }
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 main();

@@ -17,11 +17,15 @@ const logger = pino({
   level: process.env.LOG_LEVEL || "info", // Log level can be set via environment variable
   transport: {
     targets: [
-      // Output to the console using pino-pretty for prettified output
+      // Prettified console output. IMPORTANT: send it to STDERR (destination: 2),
+      // not stdout. When this process runs as an MCP server over stdio, stdout is
+      // the JSON-RPC channel — any log line there corrupts the protocol. Logs on
+      // stderr are shown by the CLI and ignored by MCP clients.
       {
         target: "pino-pretty",
         level: "info",
         options: {
+          destination: 2,
           colorize: true,
           translateTime: "SYS:yyyy-mm-dd HH:MM:ss",
           ignore: "pid,hostname",

@@ -33,15 +33,23 @@ CLI flags: `--limit <n>`, `--page <n>` (1-based), `--timeout <ms>`, `--get-html`
 - `GET /search?q=...&limit=10&page=1&timeout=30000`
 - `POST /search` `{ "query", "limit", "page", "timeout" }`
 - `GET /html?q=...&save=true`
-- Env: `PORT` (default 3000), `HOST` (default 0.0.0.0).
-- Uses one shared browser; each request gets its own context (closed after use).
+- Env: `PORT` (default 3000), `HOST` (default 0.0.0.0), `GOOGLE_SEARCH_NO_HEADED` (set to `1` by the `api`/`mcp` npm scripts — see below).
+- Each request launches its **own fresh browser** (via `googleSearch`), then closes it. A single long-lived shared browser was tried but is deferred to Tier 3 (context pool) — see the anti-bot note below for why fresh-per-request is safer.
 
 ## Architecture notes
 
-- `src/search.ts` — `googleSearch()` (paginates via `&start=`, cross-page dedup, rich results with `position`/`domain`, best-effort `peopleAlsoAsk`/`relatedSearches`) and `getGoogleSearchPageHtml()`. **Throws** on real failure (no fake "Search failed" result).
-- Result shape: `{ query, results[], peopleAlsoAsk?, relatedSearches?, pagination }` — see `src/types.ts`.
-- Anti-bot: saved browser state + fingerprint at `~/.google-search-browser-state.json`; auto-switches to headed mode on CAPTCHA.
+- `src/search.ts` — `googleSearch()` (paginates via `&start=`, cross-page dedup, rich results with `position`/`domain`, best-effort `answerBox`, `sportsMatches`, `peopleAlsoAsk`/`relatedSearches`) and `getGoogleSearchPageHtml()`. **Throws** on real failure (no fake "Search failed" result).
+- Result shape: `{ query, results[], answerBox?, sportsMatches?, peopleAlsoAsk?, relatedSearches?, pagination }` — see `src/types.ts`.
 - CLI numeric options use an explicit `(v) => parseInt(v, 10)` coercion — a bare `parseInt` receives commander's default as the radix and corrupts the value.
+- **`page.evaluate` scripts must be shipped as STRINGS, not functions.** tsx/esbuild's `keepNames` wraps named nested arrows (e.g. `const uniq = …`) in `__name(...)` calls; serialized into the browser they throw `__name is not defined`. `answerBoxScript`, `auxBlocksScript`, and `sportsWidgetScript` are string literals for this reason. `extractPageResults` gets away with being a function only because it has no nested named arrows.
+
+### Anti-bot state (why servers can 500 with a CAPTCHA)
+
+- Shared state file for **all three entry points**: `DEFAULT_STATE_FILE` = `~/.google-search-browser-state.json` (exported from `src/search.ts`; CLI `--state-file` and both servers default to it). A warm session saved by any one benefits the others. `<file>-fingerprint.json` sits alongside it.
+- **The CLI can self-heal; the servers cannot.** On a CAPTCHA the CLI falls back to **headed** mode so you solve it once and the session is saved warm. The MCP/API servers run headless with **no human**, so `npm run api`/`npm run mcp` set `GOOGLE_SEARCH_NO_HEADED=1` → on a CAPTCHA they **fail fast** with a clean error (`CaptchaBlockedError`, HTTP 502) instead of hanging ~50s trying to pop a headed window.
+- Consequence: the servers depend on a **warm** state file. A cold/stale file → CAPTCHA on every request → it re-saves the still-cold state → death spiral.
+  - **Fix / warm-up:** run the CLI once and solve any CAPTCHA — `npm run dev -- "anything"`. That seeds `~/.google-search-browser-state.json` for the servers too.
+- History: this is exactly why "search worked in the CLI but failed in the API/MCP" — they used to point at *different* state files (`./browser-state.json` vs `~/…`), so the servers never saw the CLI's warm session. Unifying the path fixed it.
 
 ## Backlog (agreed roadmap)
 

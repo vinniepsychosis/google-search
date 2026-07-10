@@ -3,15 +3,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { googleSearch, getGoogleSearchPageHtml } from "./search.js";
-import * as os from "os";
-import * as path from "path";
+import { googleSearch, getGoogleSearchPageHtml, DEFAULT_STATE_FILE } from "./search.js";
 import * as fs from "fs";
 import logger from "./logger.js";
-import { chromium, Browser } from "playwright";
 
-// Global browser instance
-let globalBrowser: Browser | undefined = undefined;
+// NOTE: each search gets its OWN fresh browser (launched + closed inside
+// googleSearch/getGoogleSearchPageHtml). A single long-lived shared browser was
+// previously reused across calls, but Google reliably serves a CAPTCHA to such a
+// persistent headless instance — even on its first request — whereas a fresh
+// browser per call (loading the same saved anti-bot state) is not flagged.
 
 // Create the MCP server instance
 const server = new McpServer({
@@ -33,6 +33,29 @@ const searchOutputSchema = {
       })
     )
     .describe("Organic search results in rank order"),
+  answerBox: z
+    .object({
+      type: z.string().describe('"featured_snippet" | "answer" | "weather" | "sports" | "knowledge_panel"'),
+      title: z.string(),
+      answer: z.string().describe("The concise, direct answer text"),
+      source: z.string(),
+    })
+    .optional()
+    .describe(
+      "Google's answer box / featured snippet / weather or sports widget / knowledge panel, when present. This is the MOST authoritative, direct answer for real-time facts (scores, weather, prices, 'current X'); prefer it over organic snippets."
+    ),
+  sportsMatches: z
+    .array(
+      z.object({
+        teams: z.array(z.string()).describe("The two sides, in display order"),
+        scores: z.array(z.number()).optional().describe("Per-team scores aligned with `teams` (live/finished matches)"),
+        stage: z.string().optional().describe('Round/stage, e.g. "Quarter-finals"'),
+        status: z.string().optional().describe('Kickoff/status label, e.g. "Tomorrow 2:30 am" or "Full-time"'),
+        startTime: z.string().optional().describe("ISO 8601 kickoff time (UTC)"),
+      })
+    )
+    .optional()
+    .describe("Structured fixtures parsed from Google's sports match widget, when present. Authoritative for real-time schedules/scores; prefer over organic snippets."),
   peopleAlsoAsk: z
     .array(z.string())
     .optional()
@@ -59,7 +82,7 @@ server.registerTool(
   {
     title: "Google Search",
     description:
-      "Use the Google search engine to query real-time web information, returning search results with titles, links, and snippets. Suitable for scenarios that require the latest information, finding material on a specific topic, researching current events, or verifying facts. Returns structured results including position, domain, snippets, and (when available) 'People also ask' and 'Related searches'.",
+      "Use the Google search engine to query real-time web information, returning search results with titles, links, and snippets. Suitable for scenarios that require the latest information, finding material on a specific topic, researching current events, or verifying facts. Returns structured results including position, domain, snippets, and (when available) an 'answerBox' — Google's featured snippet / direct answer / weather or sports widget / knowledge panel, which is the most authoritative source for real-time facts like scores, weather, and prices — plus 'People also ask' and 'Related searches'.",
     inputSchema: {
       query: z
         .string()
@@ -86,11 +109,9 @@ server.registerTool(
       const { query, limit, page, timeout } = params;
       logger.info({ query, limit, page }, "Performing Google search");
 
-      // Get the state file path in the user's home directory
-      const stateFilePath = path.join(
-        os.homedir(),
-        ".google-search-browser-state.json"
-      );
+      // Shared anti-bot state file (same one the CLI warms). This server can't solve
+      // CAPTCHAs, so it relies on this session being warm — run the CLI once to seed it.
+      const stateFilePath = DEFAULT_STATE_FILE;
       logger.info({ stateFilePath }, "Using state file path");
 
       // Check whether the state file exists
@@ -105,20 +126,34 @@ server.registerTool(
         logger.warn(warningMessage);
       }
 
-      // Perform the search using the global browser instance
-      const results = await googleSearch(
-        query,
-        {
-          limit: limit,
-          page: page,
-          timeout: timeout,
-          stateFile: stateFilePath,
-        },
-        globalBrowser
-      );
+      // Perform the search. No browser arg: googleSearch launches and closes its
+      // own fresh browser per call (a shared browser gets CAPTCHA'd by Google).
+      const results = await googleSearch(query, {
+        limit: limit,
+        page: page,
+        timeout: timeout,
+        stateFile: stateFilePath,
+      });
 
-      // Build the human-readable text block, including the warning message
+      // Build the human-readable text block. Lead with the answer box (featured
+      // snippet / widget) when present — it's the authoritative direct answer and we
+      // want the model to see it first — then the full structured JSON.
       let responseText = JSON.stringify(results, null, 2);
+      if (results.answerBox && results.answerBox.answer) {
+        const ab = results.answerBox;
+        const src = ab.source ? ` [${ab.source}]` : "";
+        responseText = `DIRECT ANSWER (${ab.type}): ${ab.answer}${src}\n\n${responseText}`;
+      }
+      if (results.sportsMatches && results.sportsMatches.length > 0) {
+        const lines = results.sportsMatches.map((m) => {
+          const score =
+            m.scores && m.scores.length === 2 ? ` ${m.scores[0]}-${m.scores[1]}` : "";
+          const when = m.status || m.startTime || "";
+          const stage = m.stage ? `${m.stage}: ` : "";
+          return `  • ${stage}${m.teams.join(" vs ")}${score}${when ? ` — ${when}` : ""}`;
+        });
+        responseText = `MATCH WIDGET:\n${lines.join("\n")}\n\n${responseText}`;
+      }
       if (warningMessage) {
         responseText = warningMessage + "\n\n" + responseText;
       }
@@ -156,98 +191,25 @@ async function main() {
   try {
     logger.info("Starting the Google search MCP server...");
 
-    // Initialize the global browser instance
-    logger.info("Initializing the global browser instance...");
-    globalBrowser = await chromium.launch({
-      headless: true,
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--disable-features=IsolateOrigins,site-per-process",
-        "--disable-site-isolation-trials",
-        "--disable-web-security",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--no-zygote",
-        "--disable-gpu",
-        "--hide-scrollbars",
-        "--mute-audio",
-        "--disable-background-networking",
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-breakpad",
-        "--disable-component-extensions-with-background-pages",
-        "--disable-extensions",
-        "--disable-features=TranslateUI",
-        "--disable-ipc-flooding-protection",
-        "--disable-renderer-backgrounding",
-        "--enable-features=NetworkService,NetworkServiceInProcess",
-        "--force-color-profile=srgb",
-        "--metrics-recording-only",
-      ],
-      ignoreDefaultArgs: ["--enable-automation"],
-    });
-    logger.info("Global browser instance initialized successfully");
-
     const transport = new StdioServerTransport();
     await server.connect(transport);
 
     logger.info("Google search MCP server started, waiting for connections...");
 
-    // Set up the cleanup function for process exit
-    process.on("exit", async () => {
-      await cleanupBrowser();
-    });
-
     // Handle Ctrl+C (Windows and Unix/Linux)
-    process.on("SIGINT", async () => {
+    process.on("SIGINT", () => {
       logger.info("Received SIGINT signal, shutting down the server...");
-      await cleanupBrowser();
       process.exit(0);
     });
 
     // Handle process termination (Unix/Linux)
-    process.on("SIGTERM", async () => {
+    process.on("SIGTERM", () => {
       logger.info("Received SIGTERM signal, shutting down the server...");
-      await cleanupBrowser();
       process.exit(0);
     });
-
-    // Windows-specific handling
-    if (process.platform === "win32") {
-      // Handle Windows CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, and CTRL_SHUTDOWN_EVENT
-      const readline = await import("readline");
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-
-      rl.on("SIGINT", async () => {
-        logger.info("Windows: Received SIGINT signal, shutting down the server...");
-        await cleanupBrowser();
-        process.exit(0);
-      });
-    }
   } catch (error) {
     logger.error({ error }, "Server startup failed");
-    await cleanupBrowser();
     process.exit(1);
-  }
-}
-
-// Clean up browser resources
-async function cleanupBrowser() {
-  if (globalBrowser) {
-    logger.info("Closing the global browser instance...");
-    try {
-      await globalBrowser.close();
-      globalBrowser = undefined;
-      logger.info("Global browser instance closed");
-    } catch (error) {
-      logger.error({ error }, "Error occurred while closing the browser instance");
-    }
   }
 }
 

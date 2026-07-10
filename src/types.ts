@@ -19,6 +19,42 @@ export interface RelatedQuestion {
 }
 
 /**
+ * Google "answer box": the featured snippet, direct answer, weather/sports widget, or
+ * knowledge panel that Google renders above the organic results. This is where
+ * authoritative real-time facts (scores, weather, prices, "current X", quick facts)
+ * live — organic result snippets frequently don't carry them. Best-effort and may be
+ * absent depending on the query and Google's (shifting) layout.
+ */
+export interface AnswerBox {
+  /** What kind of block matched: "featured_snippet" | "answer" | "weather" | "sports" | "knowledge_panel" */
+  type: string;
+  /** Optional heading/entity title for the block */
+  title: string;
+  /** The concise, direct answer text — the thing to lead with */
+  answer: string;
+  /** Attribution (a domain or short source label) when discoverable */
+  source: string;
+}
+
+/**
+ * A single fixture parsed from Google's sports "match widget" (the immersive
+ * scores card rendered above the organic results for sports queries). Best-effort:
+ * Google's DOM shifts, so any field beyond `teams` may be absent.
+ */
+export interface SportsMatch {
+  /** The two sides, in display order, e.g. ["Spain", "Belgium"] */
+  teams: string[];
+  /** Per-team scores aligned with `teams`, when the match is live/finished */
+  scores?: number[];
+  /** Competition round/stage, e.g. "Quarter-finals" */
+  stage?: string;
+  /** Human-readable status/kickoff label, e.g. "Tomorrow 2:30 am" or "Full-time" */
+  status?: string;
+  /** ISO 8601 kickoff time (UTC) from the widget's data-start-time attribute */
+  startTime?: string;
+}
+
+/**
  * Pagination metadata describing what was actually fetched
  */
 export interface PaginationInfo {
@@ -40,6 +76,10 @@ export interface PaginationInfo {
 export interface SearchResponse {
   query: string;
   results: SearchResult[];
+  /** Google's answer box / featured snippet / widget, when present (best-effort) */
+  answerBox?: AnswerBox;
+  /** Structured fixtures parsed from Google's sports match widget (best-effort) */
+  sportsMatches?: SportsMatch[];
   /** "People also ask" questions surfaced on the results page (best-effort) */
   peopleAlsoAsk?: string[];
   /** "Related searches" suggestions surfaced on the results page (best-effort) */

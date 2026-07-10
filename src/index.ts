@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { googleSearch, getGoogleSearchPageHtml } from "./search.js";
+import { googleSearch, getGoogleSearchPageHtml, DEFAULT_STATE_FILE } from "./search.js";
 import { CommandOptions } from "./types.js";
 
 // Get package information
@@ -22,7 +22,7 @@ program
   .option("-p, --page <number>", "Starting results page (1-based)", (v) => parseInt(v, 10), 1)
   .option("-t, --timeout <number>", "Timeout in milliseconds", (v) => parseInt(v, 10), 30000)
   .option("--no-headless", "Deprecated: headless mode is now always tried first, automatically switching to headed mode if a CAPTCHA is encountered")
-  .option("--state-file <path>", "Browser state file path", "./browser-state.json")
+  .option("--state-file <path>", "Browser state file path", DEFAULT_STATE_FILE)
   .option("--no-save-state", "Do not save browser state")
   .option("--get-html", "Get the raw HTML of the search result page instead of parsing results")
   .option("--save-html", "Save the HTML to a file")

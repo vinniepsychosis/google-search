@@ -1,9 +1,32 @@
-import { chromium, devices, BrowserContextOptions, Browser } from "playwright";
-import { SearchResponse, SearchResult, CommandOptions, HtmlResponse } from "./types.js";
+import { devices, BrowserContextOptions, Browser } from "playwright";
+import { chromium } from "./browser.js"; // stealth-patched Chromium (playwright-extra + stealth)
+
+// Automated mode (voice agent / MCP server / any headless backend): on a CAPTCHA there
+// is no human to solve it, so relaunching a HEADED browser just hangs for a minute and
+// pops a window. When GOOGLE_SEARCH_NO_HEADED=1, skip that recovery and fail fast so the
+// caller gets a quick "blocked" error and can move on instead of stalling the loop.
+const NO_HEADED_FALLBACK = process.env.GOOGLE_SEARCH_NO_HEADED === "1";
+class CaptchaBlockedError extends Error {
+  constructor() {
+    super("Search blocked by a Google CAPTCHA (automated mode; headed fallback disabled).");
+    this.name = "CaptchaBlockedError";
+  }
+}
+import { SearchResponse, SearchResult, AnswerBox, SportsMatch, CommandOptions, HtmlResponse } from "./types.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import logger from "./logger.js";
+
+// Default anti-bot state file, shared by the CLI, MCP server, and HTTP API so a warm
+// session saved by ANY entry point benefits the others. Absolute (home-dir) so it does
+// not depend on the current working directory. Servers cannot solve CAPTCHAs (no human),
+// so they rely on this file being kept warm — most easily by running the CLI once, which
+// falls back to headed mode to let you solve the first CAPTCHA and seed the session.
+export const DEFAULT_STATE_FILE = path.join(
+  os.homedir(),
+  ".google-search-browser-state.json"
+);
 
 // Fingerprint configuration interface
 interface FingerprintConfig {
@@ -113,7 +136,7 @@ export async function googleSearch(
     limit = 10,
     page: pageNum = 1, // Starting results page (1-based)
     timeout = 60000,
-    stateFile = "./browser-state.json",
+    stateFile = DEFAULT_STATE_FILE,
     noSaveState = false,
     locale = "zh-CN", // Default to Chinese
   } = options;
@@ -320,6 +343,22 @@ export async function googleSearch(
       javaScriptEnabled: true,
     };
 
+    // Force an English (en-US) SERP regardless of the saved/host fingerprint locale.
+    // This tool backs an English voice agent; a zh-CN (or other) locale makes Google
+    // return the answer box, weather/sports widgets and knowledge panels in that
+    // language, which is unusable downstream. Done purely via the context locale +
+    // Accept-Language header (the strongest signal Google uses to pick SERP language) so
+    // the proven navigation flow is untouched. Pass an explicit non-English `locale` to
+    // opt out.
+    const forcedLocale = locale && !/^en/i.test(locale) && locale !== "zh-CN" ? locale : "en-US";
+    contextOptions.locale = forcedLocale;
+    contextOptions.extraHTTPHeaders = {
+      ...(contextOptions.extraHTTPHeaders || {}),
+      "Accept-Language": forcedLocale.startsWith("en")
+        ? "en-US,en;q=0.9"
+        : `${forcedLocale},en;q=0.5`,
+    };
+
     if (storageState) {
       logger.info("Loading the saved browser state...");
     }
@@ -336,7 +375,7 @@ export async function googleSearch(
         get: () => [1, 2, 3, 4, 5],
       });
       Object.defineProperty(navigator, "languages", {
-        get: () => ["en-US", "en", "zh-CN"],
+        get: () => ["en-US", "en"],
       });
 
       // Override window properties
@@ -414,6 +453,12 @@ export async function googleSearch(
           currentUrl.includes(pattern) ||
           (response && response.url().toString().includes(pattern))
       );
+
+      if (NO_HEADED_FALLBACK && isBlockedPage) {
+        logger.warn("CAPTCHA detected on landing (automated mode); failing fast.");
+        try { await context.close(); } catch (_) {}
+        throw new CaptchaBlockedError();
+      }
 
       if (isBlockedPage) {
         if (headless) {
@@ -549,6 +594,12 @@ export async function googleSearch(
         searchUrl.includes(pattern)
       );
 
+      if (NO_HEADED_FALLBACK && isBlockedAfterSearch) {
+        logger.warn("CAPTCHA detected after searching (automated mode); failing fast.");
+        try { await context.close(); } catch (_) {}
+        throw new CaptchaBlockedError();
+      }
+
       if (isBlockedAfterSearch) {
         if (headless) {
           logger.warn(
@@ -652,15 +703,18 @@ export async function googleSearch(
       ];
 
       let resultsFound = false;
-      for (const selector of searchResultSelectors) {
-        try {
-          await page.waitForSelector(selector, { timeout: timeout / 2 });
-          logger.info({ selector }, "Found the search results");
-          resultsFound = true;
-          break;
-        } catch (e) {
-          // Continue trying the next selector
-        }
+      // Wait for ANY result selector in a SINGLE call (comma-joined) rather than looping
+      // 5 selectors × timeout/2 sequentially (which could stall for minutes when blocked).
+      // This returns instantly when results render and bounds the block case to one wait.
+      // In automated mode, cap the wait short (results normally render in ~1-2s) so a
+      // block is surfaced quickly instead of leaving a voice turn silent for many seconds.
+      const resultsWaitMs = NO_HEADED_FALLBACK ? Math.min(timeout / 2, 8000) : timeout / 2;
+      try {
+        await page.waitForSelector(searchResultSelectors.join(", "), { timeout: resultsWaitMs });
+        logger.info("Found the search results");
+        resultsFound = true;
+      } catch (e) {
+        // fall through to CAPTCHA / block handling
       }
 
       if (!resultsFound) {
@@ -669,6 +723,14 @@ export async function googleSearch(
         const isBlockedDuringResults = sorryPatterns.some((pattern) =>
           currentUrl.includes(pattern)
         );
+
+        // Automated backend: no human to solve a CAPTCHA, so bail fast instead of the
+        // headed-browser recovery below (which would hang and pop a window).
+        if (NO_HEADED_FALLBACK && isBlockedDuringResults) {
+          logger.warn("CAPTCHA detected (automated mode); failing fast without headed recovery.");
+          try { await context.close(); } catch (_) {}
+          throw new CaptchaBlockedError();
+        }
 
         if (isBlockedDuringResults) {
           if (headless) {
@@ -929,38 +991,61 @@ export async function googleSearch(
       // Best-effort extraction of "People also ask" and "Related searches" blocks.
       // These are supplementary signals (useful for query expansion by agents) and
       // may legitimately be empty depending on the query and Google's layout.
-      const extractAuxBlocks = (): { peopleAlsoAsk: string[]; relatedSearches: string[] } => {
-        const uniq = (arr: string[]) =>
-          Array.from(new Set(arr.map((s) => s.trim()).filter(Boolean)));
+      // NOTE: shipped to page.evaluate() as a STRING, not a function, for the same
+      // reason as answerBoxScript below: tsx/esbuild's keepNames wraps named nested
+      // arrows (e.g. `uniq`) in `__name(...)` calls, which throw `__name is not
+      // defined` once serialized into the browser. A string literal is sent verbatim.
+      const auxBlocksScript = `(() => {
+        const uniq = (arr) =>
+          Array.from(new Set(arr.map((s) => (s || "").replace(/\\s+/g, " ").trim()).filter(Boolean)));
+        // Strip Google widget chrome that gets concatenated into a node's textContent
+        // (loading/error states, feedback links) so entries dedup cleanly.
+        const scrubQ = (s) => (s || "")
+          .replace(/\\s+/g, " ")
+          .replace(/An error has occurred\\. Please try again later\\.?/gi, "")
+          .replace(/^People also ask/i, "")
+          .replace(/Feedback$/i, "")
+          .trim();
+        // A real PAA entry is a single question. Reject container blobs that
+        // concatenate several questions (more than one '?') into one node.
+        const isSingleQuestion = (s) => (s.match(/\\?/g) || []).length <= 1;
 
         // People also ask
-        const paa: string[] = [];
+        const paa = [];
         const paaSelectors = [
           'div[jsname="Cpkphb"]',
           '.related-question-pair',
           'div[data-initq]',
           'div[data-q]',
+          'div[jsname="yEVEwb"]',
         ];
         for (const sel of paaSelectors) {
           document.querySelectorAll(sel).forEach((el) => {
-            const t = (el.getAttribute('data-q') || el.textContent || '').trim();
-            if (t && t.length > 8 && t.length < 200) paa.push(t);
+            const t = scrubQ(el.getAttribute('data-q') || el.textContent || '');
+            if (t.endsWith('?') && t.length > 8 && t.length < 200 && isSingleQuestion(t)) paa.push(t);
           });
         }
-        // Fallback: heading-like elements ending with a question mark
+        // Fallback: heading-like / expandable elements ending with a question mark
         if (paa.length === 0) {
-          document.querySelectorAll('#search [role="heading"]').forEach((el) => {
-            const t = (el.textContent || '').trim();
+          document.querySelectorAll('#search [role="heading"], #search [aria-expanded]').forEach((el) => {
+            const t = scrubQ(el.textContent || '');
             if (t.endsWith('?') && t.length > 10 && t.length < 200) paa.push(t);
           });
         }
 
         // Related searches
-        const related: string[] = [];
-        const relatedSelectors = ['#bres a', 'a.k8XOCe', '.s75CSd', '.wM6W7d'];
+        const related = [];
+        const relatedSelectors = [
+          '#bres a',
+          '#botstuff a[data-ved]',
+          'a.k8XOCe',
+          '.s75CSd',
+          '.wM6W7d',
+          'div[data-abe] a',
+        ];
         for (const sel of relatedSelectors) {
           document.querySelectorAll(sel).forEach((el) => {
-            const t = (el.textContent || '').trim();
+            const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
             if (t && t.length > 2 && t.length < 100) related.push(t);
           });
         }
@@ -969,7 +1054,138 @@ export async function googleSearch(
           peopleAlsoAsk: uniq(paa).slice(0, 10),
           relatedSearches: uniq(related).slice(0, 10),
         };
-      };
+      })()`;
+
+      // Best-effort extraction of Google's "answer box": the featured snippet, direct
+      // answer, weather/sports widget, or knowledge panel rendered ABOVE the organic
+      // results. This is where authoritative real-time facts (scores, weather, prices,
+      // "current X", quick facts) live — organic snippets frequently don't carry them.
+      // Every branch is heuristic (Google's DOM shifts constantly) and defensive; the
+      // whole thing is non-fatal and yields null when nothing matches.
+      //
+      // NOTE: this is passed to page.evaluate() as a STRING, not a function, on purpose.
+      // tsx/esbuild's keepNames wraps named nested arrows in `__name(...)` calls; when a
+      // *function* is serialized into the browser those calls throw `__name is not
+      // defined`. A string literal is shipped verbatim, so no such helper is injected.
+      const answerBoxScript = `(() => {
+        const clean = (s) => (s || "").replace(/\\s+/g, " ").trim();
+        // Strip Google widget chrome that otherwise pollutes the answer text.
+        const scrub = (s) => clean((s || "")
+          .replace(/Sports results/gi, " ")
+          .replace(/MATCHES\\s+TABLE\\s+PLAYERS/gi, " ")
+          .replace(/Match recap[^]{0,12}?\\d+:\\d+/gi, " ")
+          .replace(/See more/gi, " ")
+          .replace(/Feedback/gi, " ")
+          .replace(/\\s+/g, " "));
+        // Reject bare UI labels / too-short fragments so junk like "Delete" never wins.
+        const NOISE = /^(delete|feedback|see more|more|search|images|maps|news|videos|shopping|sign in|settings|about|share|save)$/i;
+        const ok = (t, min) => !!t && t.length >= (min || 12) && !NOISE.test(t);
+        const text = (el, max) => scrub(el && (el.innerText || el.textContent)).slice(0, max || 600);
+        const firstText = (selectors, min, max) => {
+          for (const sel of selectors) {
+            const t = text(document.querySelector(sel), max);
+            if (ok(t, min)) return t;
+          }
+          return "";
+        };
+        try {
+          // 1) Weather widget (#wob_wc) — location, temperature and conditions.
+          const wob = document.querySelector("#wob_wc");
+          if (wob) {
+            const loc = clean((document.querySelector("#wob_loc") || {}).textContent);
+            const temp = clean((document.querySelector("#wob_tm") || {}).textContent);
+            const cond = clean((document.querySelector("#wob_dc") || {}).textContent);
+            const bits = [];
+            if (temp) bits.push(temp + "\\u00B0");
+            if (cond) bits.push(cond);
+            const answer = (loc ? loc + ": " : "") + bits.join(", ");
+            if (answer.trim().length > 1) return { type: "weather", title: loc, answer: answer.slice(0, 600), source: "google weather" };
+          }
+          // 2) Sports score widget — the whole match card's visible text (scrubbed).
+          const sports = document.querySelector('[data-attrid*="port"], [data-attrid*="Sports"], .imso_mh, .liveresults-sports-immersive__update-box, .liveresults-sports-immersive__updates-container, g-card .imspo_mt');
+          const sportsText = text(sports, 500);
+          if (ok(sportsText, 8)) return { type: "sports", title: "", answer: sportsText, source: "google sports" };
+          // 3) Featured snippet / direct answer.
+          const answer = firstText([".Z0LcW", ".IZ6rdc", ".hgKELc", ".LGOjhe", '[data-attrid="wa:/description"]', ".vk_ans", ".vk_bk", ".ayqGOc", ".wDYxhc"], 15, 600);
+          if (answer) {
+            const c = document.querySelector(".xpdopen cite, .g cite, .kno-rdesc + div cite");
+            return { type: "featured_snippet", title: "", answer: answer, source: clean(c && c.textContent) };
+          }
+          // 4) Knowledge panel description (needs real prose, not a stray label).
+          const kp = firstText([".kno-rdesc span", ".kno-rdesc", ".PZPZlf"], 25, 600);
+          if (kp) {
+            const h = document.querySelector('.qrShPb, .kp-header [role="heading"], .SPZz6b h2');
+            return { type: "knowledge_panel", title: clean(h && h.textContent), answer: kp, source: "" };
+          }
+        } catch (e) { return null; }
+        return null;
+      })()`;
+
+      // Structured extraction of Google's sports "match widget" — the immersive scores
+      // card rendered above the organic results (fixtures, scores, stage, kickoff time).
+      // The answerBox above only captures this as one flattened text blob; here we pull
+      // each match tile into a structured fixture so agents get teams/times/scores as data.
+      //
+      // Shipped as a STRING for the same __name serialization reason documented above.
+      const sportsWidgetScript = `(() => {
+        const clean = (s) => (s || "").replace(/\\s+/g, " ").trim();
+        try {
+          const tiles = document.querySelectorAll('.liveresults-sports-immersive__match-tile');
+          if (!tiles || tiles.length === 0) return [];
+          const out = [];
+          tiles.forEach((tile) => {
+            // Team names: one .xNfnlf per side (the visible label; the aria-hidden
+            // duplicate is a <span>, so it isn't matched here).
+            const teams = Array.from(tile.querySelectorAll('.xNfnlf'))
+              .map((e) => clean(e.textContent))
+              .filter(Boolean)
+              .slice(0, 2);
+            if (teams.length < 2) return;
+
+            const stageEl = tile.querySelector('.imspo_mt__lg-st-co');
+            const timeEl = tile.querySelector('[data-start-time]');
+
+            // Status/time: the match-status wrapper holds the date + local time for
+            // upcoming games ("Tomorrow", "2:30 am") and the state for played ones
+            // ("FT", "FT (P)", a live minute). Collect its leaf nodes and join with
+            // spaces — reading textContent directly smushes them ("FTToday").
+            const collectLeaves = (root) => {
+              if (!root) return [];
+              const parts = [];
+              root.querySelectorAll('*').forEach((n) => {
+                if (n.children.length === 0) {
+                  const t = clean(n.textContent);
+                  if (t) parts.push(t);
+                }
+              });
+              return parts;
+            };
+            let infos = collectLeaves(tile.querySelector('.imspo_mt__ms-w'));
+            if (infos.length === 0) {
+              infos = Array.from(tile.querySelectorAll('.imspo_mt__pm-inf'))
+                .map((e) => clean(e.textContent))
+                .filter(Boolean);
+            }
+            const status = Array.from(new Set(infos)).join(' ');
+
+            // Scores (live/finished only): numeric score cells aligned to the two sides.
+            const scores = Array.from(tile.querySelectorAll('.imspo_mt__sc, .imspo_mt__t-sc'))
+              .map((e) => clean(e.textContent))
+              .filter((t) => /^\\d{1,3}$/.test(t))
+              .map(Number);
+
+            const m = { teams: teams };
+            const stage = clean(stageEl && stageEl.textContent);
+            if (stage) m.stage = stage;
+            if (status) m.status = status;
+            const st = timeEl && timeEl.getAttribute('data-start-time');
+            if (st) m.startTime = st;
+            if (scores.length === 2) m.scores = scores;
+            out.push(m);
+          });
+          return out;
+        } catch (e) { return []; }
+      })()`;
 
       // Fetch pages until we reach the requested limit (or run out of results).
       const perPage = 10;
@@ -980,6 +1196,8 @@ export async function googleSearch(
       const seenLinks = new Set<string>();
       let peopleAlsoAsk: string[] = [];
       let relatedSearches: string[] = [];
+      let answerBox: AnswerBox | undefined = undefined;
+      let sportsMatches: SportsMatch[] = [];
       let pagesFetched = 0;
       let lastPageYield = 0;
 
@@ -1035,14 +1253,52 @@ export async function googleSearch(
           collected.push(r);
         }
 
-        // Capture aux blocks (PAA / related) from the first fetched page only
+        // Capture aux blocks (PAA / related) and the answer box from the first page only
         if (p === 0) {
           try {
-            const aux = await page.evaluate(extractAuxBlocks);
+            const aux = (await page.evaluate(auxBlocksScript)) as {
+              peopleAlsoAsk: string[];
+              relatedSearches: string[];
+            };
             peopleAlsoAsk = aux.peopleAlsoAsk;
             relatedSearches = aux.relatedSearches;
           } catch (auxError) {
-            logger.warn({ error: auxError }, "Failed to extract People-also-ask / Related-searches (non-fatal)");
+            logger.warn(
+              { error: auxError instanceof Error ? auxError.message : String(auxError) },
+              "Failed to extract People-also-ask / Related-searches (non-fatal)"
+            );
+          }
+          try {
+            // Answer boxes / weather / sports widgets are injected dynamically and often
+            // aren't in the DOM yet when the organic results are. Wait briefly (bounded)
+            // for any answer-box-ish container to appear before extracting; timing out is
+            // fine (many queries have no answer box at all).
+            await page
+              .waitForSelector('#wob_wc, .wDYxhc, .Z0LcW, .IZ6rdc, .kno-rdesc, .imso_mh', { timeout: 1500 })
+              .catch(() => {});
+            const ab = (await page.evaluate(answerBoxScript)) as AnswerBox | null;
+            if (ab && ab.answer) {
+              answerBox = ab;
+              logger.info({ type: ab.type }, "Extracted answer box / featured snippet");
+            }
+          } catch (abError) {
+            logger.warn({ error: abError }, "Failed to extract the answer box (non-fatal)");
+          }
+          try {
+            const matches = (await page.evaluate(sportsWidgetScript)) as SportsMatch[];
+            if (Array.isArray(matches) && matches.length > 0) {
+              sportsMatches = matches;
+              logger.info({ count: matches.length }, "Extracted sports match widget");
+              // The structured fixtures supersede the flattened "sports" answer-box blob.
+              if (answerBox && answerBox.type === "sports") {
+                answerBox = undefined;
+              }
+            }
+          } catch (sportsError) {
+            logger.warn(
+              { error: sportsError instanceof Error ? sportsError.message : String(sportsError) },
+              "Failed to extract the sports match widget (non-fatal)"
+            );
           }
         }
 
@@ -1120,6 +1376,8 @@ export async function googleSearch(
       return {
         query,
         results, // results is now accessible in this scope
+        answerBox,
+        sportsMatches: sportsMatches.length > 0 ? sportsMatches : undefined,
         peopleAlsoAsk,
         relatedSearches,
         pagination: {
@@ -1207,7 +1465,7 @@ export async function getGoogleSearchPageHtml(
   // Set default options, consistent with googleSearch
   const {
     timeout = 60000,
-    stateFile = "./browser-state.json",
+    stateFile = DEFAULT_STATE_FILE,
     noSaveState = false,
     locale = "zh-CN", // Default to Chinese
   } = options;
@@ -1394,6 +1652,22 @@ export async function getGoogleSearchPageHtml(
       javaScriptEnabled: true,
     };
 
+    // Force an English (en-US) SERP regardless of the saved/host fingerprint locale.
+    // This tool backs an English voice agent; a zh-CN (or other) locale makes Google
+    // return the answer box, weather/sports widgets and knowledge panels in that
+    // language, which is unusable downstream. Done purely via the context locale +
+    // Accept-Language header (the strongest signal Google uses to pick SERP language) so
+    // the proven navigation flow is untouched. Pass an explicit non-English `locale` to
+    // opt out.
+    const forcedLocale = locale && !/^en/i.test(locale) && locale !== "zh-CN" ? locale : "en-US";
+    contextOptions.locale = forcedLocale;
+    contextOptions.extraHTTPHeaders = {
+      ...(contextOptions.extraHTTPHeaders || {}),
+      "Accept-Language": forcedLocale.startsWith("en")
+        ? "en-US,en;q=0.9"
+        : `${forcedLocale},en;q=0.5`,
+    };
+
     if (storageState) {
       logger.info("Loading the saved browser state...");
     }
@@ -1410,7 +1684,7 @@ export async function getGoogleSearchPageHtml(
         get: () => [1, 2, 3, 4, 5],
       });
       Object.defineProperty(navigator, "languages", {
-        get: () => ["en-US", "en", "zh-CN"],
+        get: () => ["en-US", "en"],
       });
 
       // Override window properties
@@ -1488,6 +1762,12 @@ export async function getGoogleSearchPageHtml(
           currentUrl.includes(pattern) ||
           (response && response.url().toString().includes(pattern))
       );
+
+      if (NO_HEADED_FALLBACK && isBlockedPage) {
+        logger.warn("CAPTCHA detected on landing (automated mode); failing fast.");
+        try { await context.close(); } catch (_) {}
+        throw new CaptchaBlockedError();
+      }
 
       if (isBlockedPage) {
         if (headless) {
