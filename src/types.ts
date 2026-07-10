@@ -55,6 +55,46 @@ export interface SportsMatch {
 }
 
 /**
+ * A single day parsed from the weather widget's daily forecast strip.
+ */
+export interface WeatherForecastDay {
+  /** Day name, e.g. "Friday" */
+  day: string;
+  /** Sky condition, e.g. "Sunny" */
+  condition?: string;
+  /** High temperature in the widget's active unit */
+  high?: number;
+  /** Low temperature in the widget's active unit */
+  low?: number;
+}
+
+/**
+ * Structured current conditions + forecast parsed from Google's weather widget
+ * (#wob_wc, rendered above the organic results for weather queries). Best-effort:
+ * Google's DOM shifts, so any field beyond `location`/`temperature` may be absent.
+ */
+export interface Weather {
+  /** Resolved location, e.g. "Tokyo, Japan" */
+  location: string;
+  /** Current temperature in `unit` */
+  temperature: number;
+  /** Temperature unit shown, "C" or "F" */
+  unit: "C" | "F";
+  /** Current sky condition, e.g. "Clear" */
+  condition: string;
+  /** Chance of precipitation, e.g. "10%" */
+  precipitation?: string;
+  /** Relative humidity, e.g. "83%" */
+  humidity?: string;
+  /** Wind, e.g. "10 km/h" */
+  wind?: string;
+  /** Local observation time label, e.g. "Friday, 11:00 pm" */
+  observedAt?: string;
+  /** Multi-day forecast strip */
+  forecast?: WeatherForecastDay[];
+}
+
+/**
  * Pagination metadata describing what was actually fetched
  */
 export interface PaginationInfo {
@@ -80,6 +120,8 @@ export interface SearchResponse {
   answerBox?: AnswerBox;
   /** Structured fixtures parsed from Google's sports match widget (best-effort) */
   sportsMatches?: SportsMatch[];
+  /** Structured current conditions + forecast from Google's weather widget (best-effort) */
+  weather?: Weather;
   /** "People also ask" questions surfaced on the results page (best-effort) */
   peopleAlsoAsk?: string[];
   /** "Related searches" suggestions surfaced on the results page (best-effort) */

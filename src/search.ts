@@ -12,7 +12,7 @@ class CaptchaBlockedError extends Error {
     this.name = "CaptchaBlockedError";
   }
 }
-import { SearchResponse, SearchResult, AnswerBox, SportsMatch, CommandOptions, HtmlResponse } from "./types.js";
+import { SearchResponse, SearchResult, AnswerBox, SportsMatch, Weather, CommandOptions, HtmlResponse } from "./types.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -1187,6 +1187,89 @@ export async function googleSearch(
         } catch (e) { return []; }
       })()`;
 
+      // Structured extraction of Google's weather widget (#wob_wc) — current conditions
+      // plus the daily forecast strip. The answerBox only captures a flattened
+      // "Location: 25°, Clear" string; here we pull temperature/unit/humidity/wind and
+      // per-day highs/lows as data. Shipped as a STRING (same __name reason as above).
+      const weatherWidgetScript = `(() => {
+        const clean = (s) => (s || "").replace(/\\s+/g, " ").trim();
+        // Parse a signed integer, normalising Google's unicode minus (U+2212).
+        const num = (s) => {
+          const m = clean(s).replace(/\\u2212/g, "-").match(/-?\\d+/);
+          return m ? parseInt(m[0], 10) : undefined;
+        };
+        const isVisible = (el) => !!el && getComputedStyle(el).display !== "none";
+        try {
+          const wc = document.querySelector("#wob_wc");
+          if (!wc) return null;
+
+          const tmC = document.querySelector("#wob_tm");   // Celsius value
+          const tmF = document.querySelector("#wob_ttm");  // Fahrenheit value (hidden)
+          let temperature, unit;
+          if (isVisible(tmF)) { temperature = num(tmF.textContent); unit = "F"; }
+          else if (tmC) { temperature = num(tmC.textContent); unit = "C"; }
+          if (temperature === undefined) return null;
+
+          const txt = (sel) => {
+            const el = document.querySelector(sel);
+            return el ? clean(el.textContent) : "";
+          };
+          // Wind: prefer whichever unit (km/h vs mph) is visible.
+          const wsEl = document.querySelector("#wob_ws");
+          const twsEl = document.querySelector("#wob_tws");
+          const wind = isVisible(twsEl) ? clean(twsEl.textContent) : (wsEl ? clean(wsEl.textContent) : "");
+
+          // Daily forecast: the visible .wob_t in each high/low cell matches the unit.
+          const visTemp = (container) => {
+            if (!container) return undefined;
+            const spans = container.querySelectorAll(".wob_t");
+            for (const s of spans) if (isVisible(s)) return num(s.textContent);
+            return spans.length ? num(spans[0].textContent) : undefined;
+          };
+          const forecast = [];
+          document.querySelectorAll("#wob_dp .wob_df").forEach((d) => {
+            const dayEl = d.querySelector(".Z1VzSb");
+            const day = dayEl ? clean(dayEl.getAttribute("aria-label") || dayEl.textContent) : "";
+            if (!day) return;
+            const img = d.querySelector("img[alt]");
+            const entry = { day: day };
+            const cond = img ? clean(img.getAttribute("alt")) : "";
+            if (cond) entry.condition = cond;
+            const high = visTemp(d.querySelector(".gNCp2e"));
+            const low = visTemp(d.querySelector(".QrNVmd"));
+            if (high !== undefined) entry.high = high;
+            if (low !== undefined) entry.low = low;
+            forecast.push(entry);
+          });
+
+          // Location heading. #wob_loc is just the "Weather" label; the resolved place
+          // name ("Tokyo, Japan") sits in a sibling heading (.BBwThe). Fall back to the
+          // widget's aria-label or any nearby heading that isn't the bare "Weather" label.
+          let location = txt(".BBwThe");
+          if (!location || /^weather$/i.test(location)) {
+            const cand = document.querySelector('[data-attrid="title"], .wob_hdr, .card-section [role="heading"]');
+            const c = cand ? clean(cand.textContent) : "";
+            if (c && !/^weather$/i.test(c)) location = c;
+          }
+
+          const w = {
+            location: location,
+            temperature: temperature,
+            unit: unit,
+            condition: txt("#wob_dc"),
+          };
+          const precip = txt("#wob_pp");
+          const humidity = txt("#wob_hm");
+          const observedAt = txt("#wob_dts");
+          if (precip) w.precipitation = precip;
+          if (humidity) w.humidity = humidity;
+          if (wind) w.wind = wind;
+          if (observedAt) w.observedAt = observedAt;
+          if (forecast.length > 0) w.forecast = forecast;
+          return w;
+        } catch (e) { return null; }
+      })()`;
+
       // Fetch pages until we reach the requested limit (or run out of results).
       const perPage = 10;
       const startPageIdx = Math.max(1, pageNum) - 1; // 0-based index of the first page to fetch
@@ -1198,6 +1281,7 @@ export async function googleSearch(
       let relatedSearches: string[] = [];
       let answerBox: AnswerBox | undefined = undefined;
       let sportsMatches: SportsMatch[] = [];
+      let weather: Weather | undefined = undefined;
       let pagesFetched = 0;
       let lastPageYield = 0;
 
@@ -1300,6 +1384,22 @@ export async function googleSearch(
               "Failed to extract the sports match widget (non-fatal)"
             );
           }
+          try {
+            const w = (await page.evaluate(weatherWidgetScript)) as Weather | null;
+            if (w && w.location !== undefined && typeof w.temperature === "number") {
+              weather = w;
+              logger.info({ location: w.location }, "Extracted weather widget");
+              // The structured weather supersedes the flattened "weather" answer-box blob.
+              if (answerBox && answerBox.type === "weather") {
+                answerBox = undefined;
+              }
+            }
+          } catch (weatherError) {
+            logger.warn(
+              { error: weatherError instanceof Error ? weatherError.message : String(weatherError) },
+              "Failed to extract the weather widget (non-fatal)"
+            );
+          }
         }
 
         if (collected.length >= limit) break;
@@ -1378,6 +1478,7 @@ export async function googleSearch(
         results, // results is now accessible in this scope
         answerBox,
         sportsMatches: sportsMatches.length > 0 ? sportsMatches : undefined,
+        weather,
         peopleAlsoAsk,
         relatedSearches,
         pagination: {

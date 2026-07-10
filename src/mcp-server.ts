@@ -56,6 +56,29 @@ const searchOutputSchema = {
     )
     .optional()
     .describe("Structured fixtures parsed from Google's sports match widget, when present. Authoritative for real-time schedules/scores; prefer over organic snippets."),
+  weather: z
+    .object({
+      location: z.string(),
+      temperature: z.number().describe("Current temperature in `unit`"),
+      unit: z.enum(["C", "F"]),
+      condition: z.string().describe('Sky condition, e.g. "Clear"'),
+      precipitation: z.string().optional(),
+      humidity: z.string().optional(),
+      wind: z.string().optional(),
+      observedAt: z.string().optional().describe("Local observation time label"),
+      forecast: z
+        .array(
+          z.object({
+            day: z.string(),
+            condition: z.string().optional(),
+            high: z.number().optional(),
+            low: z.number().optional(),
+          })
+        )
+        .optional(),
+    })
+    .optional()
+    .describe("Structured current conditions + forecast from Google's weather widget, when present. Authoritative for real-time weather; prefer over organic snippets."),
   peopleAlsoAsk: z
     .array(z.string())
     .optional()
@@ -153,6 +176,13 @@ server.registerTool(
           return `  • ${stage}${m.teams.join(" vs ")}${score}${when ? ` — ${when}` : ""}`;
         });
         responseText = `MATCH WIDGET:\n${lines.join("\n")}\n\n${responseText}`;
+      }
+      if (results.weather) {
+        const w = results.weather;
+        const bits = [`${w.temperature}°${w.unit}`, w.condition].filter(Boolean);
+        if (w.humidity) bits.push(`humidity ${w.humidity}`);
+        if (w.wind) bits.push(`wind ${w.wind}`);
+        responseText = `WEATHER (${w.location}): ${bits.join(", ")}\n\n${responseText}`;
       }
       if (warningMessage) {
         responseText = warningMessage + "\n\n" + responseText;

@@ -38,10 +38,11 @@ CLI flags: `--limit <n>`, `--page <n>` (1-based), `--timeout <ms>`, `--get-html`
 
 ## Architecture notes
 
-- `src/search.ts` — `googleSearch()` (paginates via `&start=`, cross-page dedup, rich results with `position`/`domain`, best-effort `answerBox`, `sportsMatches`, `peopleAlsoAsk`/`relatedSearches`) and `getGoogleSearchPageHtml()`. **Throws** on real failure (no fake "Search failed" result).
-- Result shape: `{ query, results[], answerBox?, sportsMatches?, peopleAlsoAsk?, relatedSearches?, pagination }` — see `src/types.ts`.
+- `src/search.ts` — `googleSearch()` (paginates via `&start=`, cross-page dedup, rich results with `position`/`domain`, best-effort `answerBox`, `sportsMatches`, `weather`, `peopleAlsoAsk`/`relatedSearches`) and `getGoogleSearchPageHtml()`. **Throws** on real failure (no fake "Search failed" result).
+- Result shape: `{ query, results[], answerBox?, sportsMatches?, weather?, peopleAlsoAsk?, relatedSearches?, pagination }` — see `src/types.ts`.
+- Structured widgets (`sportsMatches`, `weather`) are parsed from Google's immersive cards and **supersede** the flattened `answerBox` blob of the same kind (the redundant `sports`/`weather` answerBox is dropped when the structured form is present).
 - CLI numeric options use an explicit `(v) => parseInt(v, 10)` coercion — a bare `parseInt` receives commander's default as the radix and corrupts the value.
-- **`page.evaluate` scripts must be shipped as STRINGS, not functions.** tsx/esbuild's `keepNames` wraps named nested arrows (e.g. `const uniq = …`) in `__name(...)` calls; serialized into the browser they throw `__name is not defined`. `answerBoxScript`, `auxBlocksScript`, and `sportsWidgetScript` are string literals for this reason. `extractPageResults` gets away with being a function only because it has no nested named arrows.
+- **`page.evaluate` scripts must be shipped as STRINGS, not functions.** tsx/esbuild's `keepNames` wraps named nested arrows (e.g. `const uniq = …`) in `__name(...)` calls; serialized into the browser they throw `__name is not defined`. `answerBoxScript`, `auxBlocksScript`, `sportsWidgetScript`, and `weatherWidgetScript` are string literals for this reason. `extractPageResults` gets away with being a function only because it has no nested named arrows.
 
 ### Anti-bot state (why servers can 500 with a CAPTCHA)
 
