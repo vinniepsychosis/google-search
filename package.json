@@ -23,7 +23,8 @@
     "mcp": "GOOGLE_SEARCH_NO_HEADED=1 tsx src/mcp-server.ts",
     "mcp:build": "npm run build && GOOGLE_SEARCH_NO_HEADED=1 node dist/src/mcp-server.js",
     "api": "GOOGLE_SEARCH_NO_HEADED=1 tsx src/api-server.ts",
-    "api:build": "npm run build && GOOGLE_SEARCH_NO_HEADED=1 node dist/src/api-server.js"
+    "api:build": "npm run build && GOOGLE_SEARCH_NO_HEADED=1 node dist/src/api-server.js",
+    "warm:profile": "node scripts/warm-from-chrome-profile.mjs"
   },
   "repository": {
     "type": "git",
