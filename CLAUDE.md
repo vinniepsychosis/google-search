@@ -25,7 +25,9 @@ Playwright-based Google search tool, exposed three ways: a **CLI**, an **MCP ser
 | `npm run mcp` / `mcp:build` | Run MCP server (stdio) |
 | `npm run api` / `api:build` | Run HTTP API server |
 
-CLI flags: `--limit <n>`, `--page <n>` (1-based), `--timeout <ms>`, `--get-html`, `--save-html`.
+CLI flags: `--limit <n>`, `--page <n>` (1-based), `--timeout <ms>`, `--get-html`, `--save-html`, `--images`.
+
+`--images` runs a **Google Images** search (`udm=2`) instead of web results, returning `{ query, images[], pagination }`. Also exposed as the `google-image-search` MCP tool (stdio + HTTP).
 
 ## HTTP API (src/api-server.ts)
 
@@ -41,6 +43,7 @@ CLI flags: `--limit <n>`, `--page <n>` (1-based), `--timeout <ms>`, `--get-html`
 - `src/search.ts` — `googleSearch()` (paginates via `&start=`, cross-page dedup, rich results with `position`/`domain`, best-effort `answerBox`, `sportsMatches`, `weather`, `peopleAlsoAsk`/`relatedSearches`) and `getGoogleSearchPageHtml()`. **Throws** on real failure (no fake "Search failed" result).
 - Result shape: `{ query, results[], answerBox?, sportsMatches?, weather?, peopleAlsoAsk?, relatedSearches?, pagination }` — see `src/types.ts`.
 - Structured widgets (`sportsMatches`, `weather`) are parsed from Google's immersive cards and **supersede** the flattened `answerBox` blob of the same kind (the redundant `sports`/`weather` answerBox is dropped when the structured form is present).
+- `imageSearch()` — Google Images (`udm=2`). Returns `ImageResult[]` with full-res `imageUrl` + `width`/`height` parsed from the page's **inline JSON** (each image entry is `[0,"docid",[thumbUrl,h,w],[originalUrl,h,w],…]`, joined to the DOM grid cell `div[data-attrid="images universal"]` by its `data-docid`), plus a gstatic `thumbnail`, `sourcePage` (`data-lpage`), and `source` name. Images is infinite-scroll, so **pagination is by scrolling**: it accumulates `page*limit` unique results (dedup by docid) then slices the requested page; `pagination.scrolls`/`hasMore` report the effort. On CAPTCHA it fails fast (no headed fallback in v1 — warm via the web CLI or `warm:profile`).
 - CLI numeric options use an explicit `(v) => parseInt(v, 10)` coercion — a bare `parseInt` receives commander's default as the radix and corrupts the value.
 - **`page.evaluate` scripts must be shipped as STRINGS, not functions.** tsx/esbuild's `keepNames` wraps named nested arrows (e.g. `const uniq = …`) in `__name(...)` calls; serialized into the browser they throw `__name is not defined`. `answerBoxScript`, `auxBlocksScript`, `sportsWidgetScript`, and `weatherWidgetScript` are string literals for this reason. `extractPageResults` gets away with being a function only because it has no nested named arrows.
 

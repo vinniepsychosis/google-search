@@ -95,6 +95,51 @@ export interface Weather {
 }
 
 /**
+ * A single image result from Google Images (udm=2). Best-effort: `imageUrl`/`width`/
+ * `height` come from the page's inline JSON (keyed by the cell's docid) and may be
+ * absent for lazily-appended results; `thumbnail` and `sourcePage` are always present.
+ */
+export interface ImageResult {
+  /** 1-based rank across all fetched (scrolled) results */
+  position: number;
+  /** Alt/caption text for the image */
+  title: string;
+  /** Full-resolution original image URL (from inline JSON), when recoverable */
+  imageUrl?: string;
+  /** Thumbnail URL (Google's gstatic encrypted-tbn), always present */
+  thumbnail: string;
+  /** URL of the page hosting the image */
+  sourcePage: string;
+  /** Source site name/domain, e.g. "Dav Pet Lovers" */
+  source: string;
+  /** Original image width in px (from inline JSON), when known */
+  width?: number;
+  /** Original image height in px (from inline JSON), when known */
+  height?: number;
+}
+
+/**
+ * Response for an image search. Google Images is an infinite-scroll surface, so
+ * pagination is realized by scrolling to accumulate results rather than `&start=`.
+ */
+export interface ImageSearchResponse {
+  query: string;
+  images: ImageResult[];
+  pagination?: {
+    /** 1-based page requested */
+    page: number;
+    /** Number of images requested */
+    requestedLimit: number;
+    /** Number of images actually returned */
+    returned: number;
+    /** How many scroll steps were performed to gather them */
+    scrolls: number;
+    /** Whether more images are likely available beyond what was returned */
+    hasMore: boolean;
+  };
+}
+
+/**
  * Pagination metadata describing what was actually fetched
  */
 export interface PaginationInfo {

@@ -12,7 +12,7 @@ class CaptchaBlockedError extends Error {
     this.name = "CaptchaBlockedError";
   }
 }
-import { SearchResponse, SearchResult, AnswerBox, SportsMatch, Weather, CommandOptions, HtmlResponse } from "./types.js";
+import { SearchResponse, SearchResult, AnswerBox, SportsMatch, Weather, ImageResult, ImageSearchResponse, CommandOptions, HtmlResponse } from "./types.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -2163,4 +2163,238 @@ export async function getGoogleSearchPageHtml(
 
   // First try to run in headless mode
   return performSearchAndGetHtml(useHeadless);
+}
+
+/**
+ * Search Google Images (udm=2) and return structured image results, with pagination.
+ *
+ * Images is an infinite-scroll surface (no `&start=` paging), so pagination is realized
+ * by scrolling to accumulate results: we gather `page * limit` unique images, then return
+ * the slice for the requested 1-based `page`. Reuses the same warm anti-bot state and
+ * coherent geo fingerprint as googleSearch. On a CAPTCHA it fails fast (no headed
+ * fallback in v1) — keep the session warm via the CLI web search or `npm run warm:profile`.
+ *
+ * Each result carries the full-res `imageUrl` + real `width`/`height` (parsed from the
+ * page's inline JSON, keyed by the cell's docid) plus a gstatic `thumbnail`, the
+ * `sourcePage`, and the `source` site name.
+ */
+export async function imageSearch(
+  query: string,
+  options: CommandOptions = {},
+  existingBrowser?: Browser
+): Promise<ImageSearchResponse> {
+  const {
+    limit = 20,
+    page: pageNum = 1,
+    timeout = 60000,
+    stateFile = DEFAULT_STATE_FILE,
+    noSaveState = false,
+    locale = "zh-CN",
+  } = options;
+
+  const startPage = Math.max(1, pageNum);
+  const startOffset = (startPage - 1) * limit;
+  const need = startOffset + limit;
+  const geo = resolveGeoProfile(locale);
+  const getDelay = () => 700 + Math.floor(Math.random() * 600);
+
+  // Load the saved anti-bot cookie state if present (shared with the web search).
+  const storageState: string | undefined = fs.existsSync(stateFile) ? stateFile : undefined;
+  if (storageState) logger.info({ stateFile }, "Loading saved browser state for image search");
+
+  let browser: Browser;
+  const browserWasProvided = !!existingBrowser;
+  if (existingBrowser) {
+    browser = existingBrowser;
+    logger.info("Using the existing browser instance");
+  } else {
+    browser = await chromium.launch({
+      headless: true,
+      timeout: timeout * 2,
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--disable-site-isolation-trials",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-zygote",
+        "--disable-gpu",
+        "--mute-audio",
+        "--enable-features=NetworkService,NetworkServiceInProcess",
+        "--force-color-profile=srgb",
+      ],
+      ignoreDefaultArgs: ["--enable-automation"],
+    });
+  }
+
+  const contextOptions: BrowserContextOptions = {
+    ...devices["Desktop Chrome"],
+    locale: geo.locale,
+    timezoneId: geo.timezoneId,
+    permissions: ["geolocation", "notifications"],
+    acceptDownloads: true,
+    isMobile: false,
+    hasTouch: false,
+    javaScriptEnabled: true,
+    extraHTTPHeaders: { "Accept-Language": geo.acceptLanguage },
+  };
+
+  const navLanguages =
+    /^en/i.test(geo.locale) && geo.locale.toLowerCase() !== "en"
+      ? [geo.locale, "en"]
+      : [geo.locale];
+
+  const context = await browser.newContext(
+    storageState ? { ...contextOptions, storageState } : contextOptions
+  );
+  await context.addInitScript((langs: string[]) => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+    Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, "languages", { get: () => langs });
+    // @ts-ignore - the chrome property is not typed on window
+    window.chrome = { runtime: {}, loadTimes: function () {}, csi: function () {}, app: {} };
+  }, navLanguages);
+
+  const page = await context.newPage();
+
+  // STRING (not a function) for the same tsx/esbuild __name serialization reason as the
+  // other page.evaluate extractors in this file.
+  const extractImagesScript = `(() => {
+    const clean = (s) => (s || "").replace(/\\s+/g, " ").trim();
+    // Decode \\uXXXX escapes in an inline-JSON URL via JSON.parse (URLs never contain a
+    // raw double-quote, so wrapping in quotes is safe).
+    const unesc = (s) => { try { return JSON.parse('"' + s + '"'); } catch (e) { return s; } };
+    // docid -> {thumb, original, width, height} from the page's inline JSON. Each image
+    // entry looks like [0,"docid",[thumbUrl,h,w],[originalUrl,h,w],...].
+    const map = {};
+    const src = document.documentElement.innerHTML;
+    const re = /"([\\w-]{6,})",\\["(https?:[^"]+?)",(\\d+),(\\d+)\\],\\["(https?:[^"]+?)",(\\d+),(\\d+)\\]/g;
+    let m;
+    while ((m = re.exec(src))) {
+      if (!map[m[1]]) {
+        map[m[1]] = { thumb: unesc(m[2]), original: unesc(m[5]), height: parseInt(m[6], 10), width: parseInt(m[7], 10) };
+      }
+    }
+    const out = [];
+    document.querySelectorAll('div[data-attrid="images universal"]').forEach((cell) => {
+      const docid = cell.getAttribute('data-docid') || '';
+      const lpage = cell.getAttribute('data-lpage') || '';
+      const imgEl = cell.querySelector('.ImUqSb img') || cell.querySelector('img[alt]:not([alt=""])');
+      const title = clean((imgEl && imgEl.getAttribute('alt')) || (cell.querySelector('.Q6A6Dc') || {}).textContent);
+      const source = clean((cell.querySelector('.VYhLad span, .VYhLad') || {}).textContent);
+      const meta = map[docid] || {};
+      const thumbnail = meta.thumb || (imgEl && imgEl.getAttribute('src')) || '';
+      if (!lpage && !meta.original) return;
+      const r = { docid: docid, title: title, sourcePage: lpage, source: source, thumbnail: thumbnail };
+      if (meta.original) r.imageUrl = meta.original;
+      if (meta.width) r.width = meta.width;
+      if (meta.height) r.height = meta.height;
+      out.push(r);
+    });
+    return out;
+  })()`;
+
+  try {
+    const url = new URL(geo.googleDomain + "/search");
+    url.searchParams.set("q", query);
+    url.searchParams.set("udm", "2"); // Images vertical (replaces the legacy tbm=isch)
+    logger.info({ query, url: url.toString() }, "Visiting Google Images...");
+    await page.goto(url.toString(), { timeout, waitUntil: "domcontentloaded" });
+
+    if (page.url().includes("/sorry/") || page.url().includes("/sorry?")) {
+      logger.warn("CAPTCHA on image search; failing fast.");
+      try { await context.close(); } catch (e) {}
+      if (!browserWasProvided) await browser.close();
+      throw new CaptchaBlockedError();
+    }
+
+    await page.waitForTimeout(1500);
+
+    // Scroll-pagination: accumulate unique images until we have `need`, growth stalls, or
+    // we hit the scroll cap.
+    const collected: any[] = [];
+    const seen = new Set<string>();
+    let scrolls = 0;
+    let stagnant = 0;
+    const maxScrolls = 40;
+    const merge = (arr: any[]) => {
+      for (const r of arr) {
+        const key = r.docid || r.imageUrl || r.sourcePage;
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          collected.push(r);
+        }
+      }
+    };
+    while (collected.length < need && scrolls < maxScrolls && stagnant < 3) {
+      const batch = (await page.evaluate(extractImagesScript)) as any[];
+      const before = collected.length;
+      merge(batch);
+      if (collected.length === before) stagnant++;
+      else stagnant = 0;
+      if (collected.length >= need) break;
+      await page.evaluate("window.scrollTo(0, document.body.scrollHeight)");
+      await page.waitForTimeout(getDelay());
+      scrolls++;
+    }
+
+    const images: ImageResult[] = collected
+      .slice(startOffset, startOffset + limit)
+      .map((r, i) => ({
+        position: startOffset + i + 1,
+        title: r.title,
+        imageUrl: r.imageUrl,
+        thumbnail: r.thumbnail,
+        sourcePage: r.sourcePage,
+        source: r.source,
+        width: r.width,
+        height: r.height,
+      }));
+
+    logger.info(
+      { count: images.length, scrolls, gathered: collected.length },
+      "Successfully retrieved image results"
+    );
+
+    if (!noSaveState) {
+      try {
+        const dir = path.dirname(stateFile);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        await context.storageState({ path: stateFile });
+      } catch (e) {
+        logger.warn(
+          { error: e instanceof Error ? e.message : String(e) },
+          "Failed to save browser state (non-fatal)"
+        );
+      }
+    }
+
+    if (!browserWasProvided) await browser.close();
+    else { try { await context.close(); } catch (e) {} }
+
+    return {
+      query,
+      images,
+      pagination: {
+        page: startPage,
+        requestedLimit: limit,
+        returned: images.length,
+        scrolls,
+        hasMore: collected.length > startOffset + limit,
+      },
+    };
+  } catch (error) {
+    try { await context.close(); } catch (e) {}
+    if (!browserWasProvided) { try { await browser.close(); } catch (e) {} }
+    if (error instanceof CaptchaBlockedError) throw error;
+    logger.error(
+      { error: error instanceof Error ? error.message : String(error) },
+      "Image search failed"
+    );
+    throw new Error(
+      `Image search failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }

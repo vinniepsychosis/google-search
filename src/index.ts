@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { googleSearch, getGoogleSearchPageHtml, DEFAULT_STATE_FILE } from "./search.js";
+import { googleSearch, getGoogleSearchPageHtml, imageSearch, DEFAULT_STATE_FILE } from "./search.js";
 import { CommandOptions } from "./types.js";
 
 // Get package information
@@ -27,9 +27,14 @@ program
   .option("--get-html", "Get the raw HTML of the search result page instead of parsing results")
   .option("--save-html", "Save the HTML to a file")
   .option("--html-output <path>", "HTML output file path")
-  .action(async (query: string, options: CommandOptions & { getHtml?: boolean, saveHtml?: boolean, htmlOutput?: string }) => {
+  .option("--images", "Search Google Images instead of web results (paginates via scroll)")
+  .action(async (query: string, options: CommandOptions & { getHtml?: boolean, saveHtml?: boolean, htmlOutput?: string, images?: boolean }) => {
     try {
-      if (options.getHtml) {
+      if (options.images) {
+        // Image search (Google Images / udm=2)
+        const imageResults = await imageSearch(query, options);
+        console.log(JSON.stringify(imageResults, null, 2));
+      } else if (options.getHtml) {
         // Get HTML
         const htmlResult = await getGoogleSearchPageHtml(
           query,

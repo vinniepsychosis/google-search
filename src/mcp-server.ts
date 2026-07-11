@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { googleSearch, getGoogleSearchPageHtml, DEFAULT_STATE_FILE } from "./search.js";
+import { googleSearch, getGoogleSearchPageHtml, imageSearch, DEFAULT_STATE_FILE } from "./search.js";
 import * as fs from "fs";
 import { fileURLToPath } from "url";
 import logger from "./logger.js";
@@ -220,6 +220,81 @@ server.registerTool(
     }
   }
 );
+
+  // Image search tool (Google Images / udm=2), paginated via scroll.
+  server.registerTool(
+    "google-image-search",
+    {
+      title: "Google Image Search",
+      description:
+        "Search Google Images and return structured image results: full-resolution image URL, dimensions, a thumbnail, the source page URL, and the source site name. Use for finding images, visual references, product photos, diagrams, etc. Paginates by scrolling (Images is infinite-scroll): 'limit' is the number of images to return, 'page' (1-based) offsets into the accumulated results.",
+      inputSchema: {
+        query: z.string().describe("The image search query."),
+        limit: z
+          .number()
+          .optional()
+          .describe("Number of images to return (default 20; larger values scroll more)."),
+        page: z.number().optional().describe("1-based page for offsetting results (default 1)."),
+        timeout: z.number().optional().describe("Timeout in milliseconds (default 60000)."),
+      },
+      outputSchema: {
+        query: z.string(),
+        images: z.array(
+          z.object({
+            position: z.number(),
+            title: z.string(),
+            imageUrl: z.string().optional().describe("Full-resolution original image URL"),
+            thumbnail: z.string().describe("Thumbnail URL (gstatic)"),
+            sourcePage: z.string().describe("Page hosting the image"),
+            source: z.string().describe("Source site name"),
+            width: z.number().optional(),
+            height: z.number().optional(),
+          })
+        ),
+        pagination: z
+          .object({
+            page: z.number(),
+            requestedLimit: z.number(),
+            returned: z.number(),
+            scrolls: z.number(),
+            hasMore: z.boolean(),
+          })
+          .optional(),
+      },
+    },
+    async (params) => {
+      try {
+        const { query, limit, page, timeout } = params;
+        logger.info({ query, limit, page }, "Performing Google image search");
+        const results = await imageSearch(query, {
+          limit,
+          page,
+          timeout,
+          stateFile: DEFAULT_STATE_FILE,
+        });
+        const lines = results.images.map(
+          (im) =>
+            `  ${im.position}. ${im.title || "(untitled)"} — ${im.imageUrl || im.thumbnail} [${im.source}]`
+        );
+        const text = `IMAGES for "${results.query}" (${results.images.length}):\n${lines.join("\n")}\n\n${JSON.stringify(results, null, 2)}`;
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: results as unknown as Record<string, unknown>,
+        };
+      } catch (error) {
+        logger.error({ error }, "Image search tool execution error");
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Image search failed: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
 
   return server;
 }
