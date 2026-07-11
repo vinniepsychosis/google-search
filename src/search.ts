@@ -49,36 +49,70 @@ interface SavedState {
  * @param userLocale User-specified locale (if any)
  * @returns Fingerprint configuration based on the host machine
  */
+// Map an IANA timezone to the matching Google ccTLD, so the domain agrees with the
+// exit region. (Modern Google serves results by IP regardless of ccTLD, but a saved
+// foreign domain — e.g. google.co.uk on an Indian session — is still an odd signal.)
+function googleDomainForTimezone(tz: string): string {
+  if (/^Asia\/(Kolkata|Calcutta)/.test(tz)) return "https://www.google.co.in";
+  if (/^America\//.test(tz)) return "https://www.google.com";
+  if (tz === "Europe/London") return "https://www.google.co.uk";
+  if (tz === "Europe/Dublin") return "https://www.google.ie";
+  if (/^Australia\//.test(tz)) return "https://www.google.com.au";
+  if (/^Asia\/Singapore/.test(tz)) return "https://www.google.com.sg";
+  return "https://www.google.com";
+}
+
+// Map an IANA timezone to a matching English SERP locale, so the interface language
+// agrees with the region rather than fighting it.
+function englishLocaleForTimezone(tz: string): string {
+  if (/^Asia\/(Kolkata|Calcutta)/.test(tz)) return "en-IN";
+  if (/^America\//.test(tz)) return "en-US";
+  if (tz === "Europe/Dublin") return "en-IE";
+  if (/^Europe\//.test(tz)) return "en-GB";
+  if (/^Australia\//.test(tz)) return "en-AU";
+  if (/^Pacific\/Auckland/.test(tz)) return "en-NZ";
+  if (/^Asia\/Singapore/.test(tz)) return "en-SG";
+  return "en-US";
+}
+
+// Resolve a COHERENT geo fingerprint: the SERP language, the IANA timezone, and the
+// Accept-Language header, all derived so they agree with each OTHER and with the exit IP.
+// Anti-bot systems triangulate Accept-Language ↔ Intl timezone ↔ IP geolocation; an
+// internal contradiction (e.g. en-US language on an Asia/Shanghai clock from an Indian
+// IP) is a strong bot signal. The timezone comes from the real runtime (or an override),
+// never a lossy offset guess. Env overrides let you match a proxy's exit region:
+//   GOOGLE_SEARCH_TIMEZONE=America/New_York  GOOGLE_SEARCH_LOCALE=en-US
+export function resolveGeoProfile(userLocale?: string): {
+  locale: string;
+  timezoneId: string;
+  acceptLanguage: string;
+  googleDomain: string;
+} {
+  const timezoneId =
+    process.env.GOOGLE_SEARCH_TIMEZONE ||
+    Intl.DateTimeFormat().resolvedOptions().timeZone ||
+    "UTC";
+  // Default to an English SERP (this tool backs an English agent) in the English variant
+  // that matches the timezone's region. An explicit locale (env or caller) is honored;
+  // "zh-CN" is treated as unset — it's the legacy hard-coded default, not a real choice.
+  const explicit = process.env.GOOGLE_SEARCH_LOCALE || userLocale;
+  const locale =
+    explicit && explicit !== "zh-CN" ? explicit : englishLocaleForTimezone(timezoneId);
+  const acceptLanguage = /^en/i.test(locale)
+    ? `${locale},en;q=0.9`
+    : `${locale},en;q=0.5`;
+  const googleDomain =
+    process.env.GOOGLE_SEARCH_DOMAIN || googleDomainForTimezone(timezoneId);
+  return { locale, timezoneId, acceptLanguage, googleDomain };
+}
+
 function getHostMachineConfig(userLocale?: string): FingerprintConfig {
-  // Get the system locale
-  const systemLocale = userLocale || process.env.LANG || "zh-CN";
-
-  // Get the system timezone
-  // Node.js does not directly provide timezone information, but it can be inferred from the timezone offset
-  const timezoneOffset = new Date().getTimezoneOffset();
-  let timezoneId = "Asia/Shanghai"; // Default to the Shanghai timezone
-
-  // Roughly infer the timezone from the timezone offset
-  // The timezone offset is in minutes, representing the difference from UTC; a negative value indicates an eastern timezone
-  if (timezoneOffset <= -480 && timezoneOffset > -600) {
-    // UTC+8 (China, Singapore, Hong Kong, etc.)
-    timezoneId = "Asia/Shanghai";
-  } else if (timezoneOffset <= -540) {
-    // UTC+9 (Japan, Korea, etc.)
-    timezoneId = "Asia/Tokyo";
-  } else if (timezoneOffset <= -420 && timezoneOffset > -480) {
-    // UTC+7 (Thailand, Vietnam, etc.)
-    timezoneId = "Asia/Bangkok";
-  } else if (timezoneOffset <= 0 && timezoneOffset > -60) {
-    // UTC+0 (United Kingdom, etc.)
-    timezoneId = "Europe/London";
-  } else if (timezoneOffset <= 60 && timezoneOffset > 0) {
-    // UTC-1 (parts of Europe)
-    timezoneId = "Europe/Berlin";
-  } else if (timezoneOffset <= 300 && timezoneOffset > 240) {
-    // UTC-5 (eastern United States)
-    timezoneId = "America/New_York";
-  }
+  // Coherent (language, timezone) from the real runtime — see resolveGeoProfile. The old
+  // getTimezoneOffset() heuristic had no branch for UTC+5:30 (India) and several others,
+  // so it silently mislabeled them all as Asia/Shanghai.
+  const geo = resolveGeoProfile(userLocale);
+  const systemLocale = geo.locale;
+  const timezoneId = geo.timezoneId;
 
   // Detect the system color scheme
   // Node.js cannot directly obtain the system color scheme, so use a reasonable default
@@ -192,14 +226,6 @@ export async function googleSearch(
     "Asia/Shanghai",
     "Europe/Berlin",
     "Asia/Tokyo",
-  ];
-
-  // Google domain list
-  const googleDomains = [
-    "https://www.google.com",
-    "https://www.google.co.uk",
-    "https://www.google.ca",
-    "https://www.google.com.au",
   ];
 
   // Get a random device configuration or use the saved configuration
@@ -343,21 +369,32 @@ export async function googleSearch(
       javaScriptEnabled: true,
     };
 
-    // Force an English (en-US) SERP regardless of the saved/host fingerprint locale.
-    // This tool backs an English voice agent; a zh-CN (or other) locale makes Google
-    // return the answer box, weather/sports widgets and knowledge panels in that
-    // language, which is unusable downstream. Done purely via the context locale +
-    // Accept-Language header (the strongest signal Google uses to pick SERP language) so
-    // the proven navigation flow is untouched. Pass an explicit non-English `locale` to
-    // opt out.
-    const forcedLocale = locale && !/^en/i.test(locale) && locale !== "zh-CN" ? locale : "en-US";
-    contextOptions.locale = forcedLocale;
+    // Apply a COHERENT geo fingerprint: SERP language, IANA timezone, and Accept-Language
+    // that all agree with each other AND with the exit IP. Incoherence here — e.g. en-US
+    // language on an Asia/Shanghai clock from an Indian IP — was a strong bot signal that
+    // triggered CAPTCHAs. Resolved fresh (env override → real machine) and applied OVER any
+    // saved fingerprint, so a stale/poisoned timezone can never linger. Also updates the
+    // persisted fingerprint so the fix self-heals on the next save.
+    const geo = resolveGeoProfile(locale);
+    contextOptions.locale = geo.locale;
+    contextOptions.timezoneId = geo.timezoneId;
     contextOptions.extraHTTPHeaders = {
       ...(contextOptions.extraHTTPHeaders || {}),
-      "Accept-Language": forcedLocale.startsWith("en")
-        ? "en-US,en;q=0.9"
-        : `${forcedLocale},en;q=0.5`,
+      "Accept-Language": geo.acceptLanguage,
     };
+    if (savedState.fingerprint) {
+      savedState.fingerprint.locale = geo.locale;
+      savedState.fingerprint.timezoneId = geo.timezoneId;
+    }
+    // navigator.languages must match the locale — Chrome exposes [regional, base].
+    const navLanguages =
+      /^en/i.test(geo.locale) && geo.locale.toLowerCase() !== "en"
+        ? [geo.locale, "en"]
+        : [geo.locale];
+    logger.info(
+      { locale: geo.locale, timezone: geo.timezoneId },
+      "Applied coherent geo fingerprint"
+    );
 
     if (storageState) {
       logger.info("Loading the saved browser state...");
@@ -368,14 +405,15 @@ export async function googleSearch(
     );
 
     // Set additional browser properties to avoid detection
-    await context.addInitScript(() => {
+    await context.addInitScript((langs: string[]) => {
       // Override navigator properties
       Object.defineProperty(navigator, "webdriver", { get: () => false });
       Object.defineProperty(navigator, "plugins", {
         get: () => [1, 2, 3, 4, 5],
       });
+      // navigator.languages kept coherent with the context locale / Accept-Language.
       Object.defineProperty(navigator, "languages", {
-        get: () => ["en-US", "en"],
+        get: () => langs,
       });
 
       // Override window properties
@@ -403,7 +441,7 @@ export async function googleSearch(
           return getParameter.call(this, parameter);
         };
       }
-    });
+    }, navLanguages);
 
     const page = await context.newPage();
 
@@ -417,18 +455,12 @@ export async function googleSearch(
     });
 
     try {
-      // Use the saved Google domain or randomly select one
-      let selectedDomain: string;
-      if (savedState.googleDomain) {
-        selectedDomain = savedState.googleDomain;
-        logger.info({ domain: selectedDomain }, "Using the saved Google domain");
-      } else {
-        selectedDomain =
-          googleDomains[Math.floor(Math.random() * googleDomains.length)];
-        // Save the selected domain
-        savedState.googleDomain = selectedDomain;
-        logger.info({ domain: selectedDomain }, "Randomly selected a Google domain");
-      }
+      // Google domain coherent with the resolved geo (matches the exit IP's region).
+      // Applied OVER any saved domain so a stale/foreign ccTLD — e.g. a randomly-picked
+      // google.co.uk on an Indian session — can't linger and contradict the fingerprint.
+      const selectedDomain = geo.googleDomain;
+      savedState.googleDomain = selectedDomain;
+      logger.info({ domain: selectedDomain }, "Using the geo-coherent Google domain");
 
       logger.info("Visiting the Google search page...");
 
@@ -1616,14 +1648,6 @@ export async function getGoogleSearchPageHtml(
     "Desktop Safari",
   ];
 
-  // Google domain list
-  const googleDomains = [
-    "https://www.google.com",
-    "https://www.google.co.uk",
-    "https://www.google.ca",
-    "https://www.google.com.au",
-  ];
-
   // Get a random device configuration or use the saved configuration
   const getDeviceConfig = (): [string, any] => {
     if (
@@ -1753,21 +1777,32 @@ export async function getGoogleSearchPageHtml(
       javaScriptEnabled: true,
     };
 
-    // Force an English (en-US) SERP regardless of the saved/host fingerprint locale.
-    // This tool backs an English voice agent; a zh-CN (or other) locale makes Google
-    // return the answer box, weather/sports widgets and knowledge panels in that
-    // language, which is unusable downstream. Done purely via the context locale +
-    // Accept-Language header (the strongest signal Google uses to pick SERP language) so
-    // the proven navigation flow is untouched. Pass an explicit non-English `locale` to
-    // opt out.
-    const forcedLocale = locale && !/^en/i.test(locale) && locale !== "zh-CN" ? locale : "en-US";
-    contextOptions.locale = forcedLocale;
+    // Apply a COHERENT geo fingerprint: SERP language, IANA timezone, and Accept-Language
+    // that all agree with each other AND with the exit IP. Incoherence here — e.g. en-US
+    // language on an Asia/Shanghai clock from an Indian IP — was a strong bot signal that
+    // triggered CAPTCHAs. Resolved fresh (env override → real machine) and applied OVER any
+    // saved fingerprint, so a stale/poisoned timezone can never linger. Also updates the
+    // persisted fingerprint so the fix self-heals on the next save.
+    const geo = resolveGeoProfile(locale);
+    contextOptions.locale = geo.locale;
+    contextOptions.timezoneId = geo.timezoneId;
     contextOptions.extraHTTPHeaders = {
       ...(contextOptions.extraHTTPHeaders || {}),
-      "Accept-Language": forcedLocale.startsWith("en")
-        ? "en-US,en;q=0.9"
-        : `${forcedLocale},en;q=0.5`,
+      "Accept-Language": geo.acceptLanguage,
     };
+    if (savedState.fingerprint) {
+      savedState.fingerprint.locale = geo.locale;
+      savedState.fingerprint.timezoneId = geo.timezoneId;
+    }
+    // navigator.languages must match the locale — Chrome exposes [regional, base].
+    const navLanguages =
+      /^en/i.test(geo.locale) && geo.locale.toLowerCase() !== "en"
+        ? [geo.locale, "en"]
+        : [geo.locale];
+    logger.info(
+      { locale: geo.locale, timezone: geo.timezoneId },
+      "Applied coherent geo fingerprint"
+    );
 
     if (storageState) {
       logger.info("Loading the saved browser state...");
@@ -1778,14 +1813,15 @@ export async function getGoogleSearchPageHtml(
     );
 
     // Set additional browser properties to avoid detection
-    await context.addInitScript(() => {
+    await context.addInitScript((langs: string[]) => {
       // Override navigator properties
       Object.defineProperty(navigator, "webdriver", { get: () => false });
       Object.defineProperty(navigator, "plugins", {
         get: () => [1, 2, 3, 4, 5],
       });
+      // navigator.languages kept coherent with the context locale / Accept-Language.
       Object.defineProperty(navigator, "languages", {
-        get: () => ["en-US", "en"],
+        get: () => langs,
       });
 
       // Override window properties
@@ -1813,7 +1849,7 @@ export async function getGoogleSearchPageHtml(
           return getParameter.call(this, parameter);
         };
       }
-    });
+    }, navLanguages);
 
     const page = await context.newPage();
 
@@ -1827,18 +1863,12 @@ export async function getGoogleSearchPageHtml(
     });
 
     try {
-      // Use the saved Google domain or randomly select one
-      let selectedDomain: string;
-      if (savedState.googleDomain) {
-        selectedDomain = savedState.googleDomain;
-        logger.info({ domain: selectedDomain }, "Using the saved Google domain");
-      } else {
-        selectedDomain =
-          googleDomains[Math.floor(Math.random() * googleDomains.length)];
-        // Save the selected domain
-        savedState.googleDomain = selectedDomain;
-        logger.info({ domain: selectedDomain }, "Randomly selected a Google domain");
-      }
+      // Google domain coherent with the resolved geo (matches the exit IP's region).
+      // Applied OVER any saved domain so a stale/foreign ccTLD — e.g. a randomly-picked
+      // google.co.uk on an Indian session — can't linger and contradict the fingerprint.
+      const selectedDomain = geo.googleDomain;
+      savedState.googleDomain = selectedDomain;
+      logger.info({ domain: selectedDomain }, "Using the geo-coherent Google domain");
 
       logger.info("Visiting the Google search page...");
 
