@@ -22,6 +22,8 @@
     "clean": "node -e \"const fs = require('fs'); const path = require('path'); if (fs.existsSync('dist')) fs.rmSync('dist', { recursive: true, force: true });\"",
     "mcp": "GOOGLE_SEARCH_NO_HEADED=1 tsx src/mcp-server.ts",
     "mcp:build": "npm run build && GOOGLE_SEARCH_NO_HEADED=1 node dist/src/mcp-server.js",
+    "mcp:http": "GOOGLE_SEARCH_NO_HEADED=1 tsx src/mcp-http-server.ts",
+    "mcp:http:build": "npm run build && GOOGLE_SEARCH_NO_HEADED=1 node dist/src/mcp-http-server.js",
     "api": "GOOGLE_SEARCH_NO_HEADED=1 tsx src/api-server.ts",
     "api:build": "npm run build && GOOGLE_SEARCH_NO_HEADED=1 node dist/src/api-server.js",
     "warm:profile": "node scripts/warm-from-chrome-profile.mjs"

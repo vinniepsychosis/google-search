@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { googleSearch, getGoogleSearchPageHtml, DEFAULT_STATE_FILE } from "./search.js";
 import * as fs from "fs";
+import { fileURLToPath } from "url";
 import logger from "./logger.js";
 
 // NOTE: each search gets its OWN fresh browser (launched + closed inside
@@ -13,11 +14,15 @@ import logger from "./logger.js";
 // persistent headless instance — even on its first request — whereas a fresh
 // browser per call (loading the same saved anti-bot state) is not flagged.
 
-// Create the MCP server instance
-const server = new McpServer({
-  name: "google-search-server",
-  version: "1.0.0",
-});
+// Build a fresh MCP server with the google-search tool registered. A factory (not a
+// shared singleton) so the stateless Streamable HTTP transport can spin up one per
+// request, while the stdio entrypoint below uses a single instance. Both entrypoints
+// (mcp-server.ts / mcp-http-server.ts) share this exact tool definition.
+export function createMcpServer(): McpServer {
+  const server = new McpServer({
+    name: "google-search-server",
+    version: "1.0.0",
+  });
 
 // Structured output schema for the search tool (mirrors SearchResponse)
 const searchOutputSchema = {
@@ -216,10 +221,15 @@ server.registerTool(
   }
 );
 
-// Start the server
+  return server;
+}
+
+// stdio entrypoint — for local MCP clients that spawn this file as a subprocess
+// (Claude Desktop, etc.). Networked clients like n8n use mcp-http-server.ts instead.
 async function main() {
+  const server = createMcpServer();
   try {
-    logger.info("Starting the Google search MCP server...");
+    logger.info("Starting the Google search MCP server (stdio)...");
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
@@ -243,4 +253,8 @@ async function main() {
   }
 }
 
-main();
+// Only auto-start the stdio server when this file is run directly, so importing
+// createMcpServer() from mcp-http-server.ts doesn't spin up a stdio server too.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main();
+}
