@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 
 import express, { Request, Response, NextFunction } from "express";
-import { googleSearch, getGoogleSearchPageHtml, DEFAULT_STATE_FILE } from "./search.js";
-import { CommandOptions } from "./types.js";
+import { getGoogleSearchPageHtml, DEFAULT_STATE_FILE } from "./search.js";
+import { search, SUPPORTED_ENGINES } from "./engines.js";
+import { CommandOptions, SearchEngine } from "./types.js";
 import logger from "./logger.js";
 
-// Each request gets its OWN fresh browser (launched + closed inside googleSearch).
-// A shared long-lived browser was used before; it's dropped here to match the CLI
-// path and is deferred to the Tier-3 context-pool work.
+// Each request gets its OWN fresh browser (launched + closed inside search() /
+// getGoogleSearchPageHtml). A shared long-lived browser was dropped because Google
+// reliably CAPTCHAs a persistent headless instance; the shared-browser optimization is
+// deferred to the Tier-3 context-pool work.
 //
-// IMPORTANT: this server cannot solve CAPTCHAs (no human, and headed fallback is
-// disabled via GOOGLE_SEARCH_NO_HEADED). It therefore depends on a WARM anti-bot
-// session in DEFAULT_STATE_FILE. That file is shared with the CLI, so running the
-// CLI once (which can fall back to headed mode to solve the first CAPTCHA) seeds
-// the session for this server. A cold/stale state file → CAPTCHA on every request.
+// IMPORTANT: this server can't solve CAPTCHAs (no human; headed fallback disabled via
+// GOOGLE_SEARCH_NO_HEADED), so it depends on a WARM anti-bot session in DEFAULT_STATE_FILE
+// (shared with the CLI — run the CLI once, or `npm run warm:profile`).
 const stateFilePath = DEFAULT_STATE_FILE;
 
 /**
@@ -25,10 +25,19 @@ function toPositiveInt(value: unknown, fallback: number): number {
 }
 
 /**
+ * Coerce an engine parameter to a supported engine, defaulting to google.
+ */
+function toEngine(value: unknown): SearchEngine {
+  const e = typeof value === "string" ? value.toLowerCase() : "";
+  return (SUPPORTED_ENGINES as string[]).includes(e) ? (e as SearchEngine) : "google";
+}
+
+/**
  * Build search options from a request's merged query + body parameters.
  */
 function optionsFromParams(source: Record<string, unknown>): CommandOptions {
   const options: CommandOptions = {
+    engine: toEngine(source.engine),
     limit: toPositiveInt(source.limit, 10),
     page: toPositiveInt(source.page, 1),
     timeout: toPositiveInt(source.timeout, 30000),
@@ -50,6 +59,7 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
+    engines: SUPPORTED_ENGINES,
     uptimeSeconds: Math.round(process.uptime()),
   });
 });
@@ -71,8 +81,8 @@ async function handleSearch(req: Request, res: Response): Promise<void> {
   const options = optionsFromParams(merged);
 
   try {
-    // No third arg: googleSearch launches and closes its own fresh browser.
-    const results = await googleSearch(query.trim(), options);
+    // No shared browser arg: each engine launches/closes its own fresh browser.
+    const results = await search(query.trim(), options);
     res.json(results);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -84,12 +94,12 @@ async function handleSearch(req: Request, res: Response): Promise<void> {
   }
 }
 
-// GET /search?q=...&limit=...&page=...&timeout=...
+// GET /search?q=...&engine=...&limit=...&page=...&timeout=...
 app.get("/search", (req, res) => {
   void handleSearch(req, res);
 });
 
-// POST /search  { "query": "...", "limit": 10, "page": 1, "timeout": 30000 }
+// POST /search  { "query": "...", "engine": "google", "limit": 10, "page": 1, "timeout": 30000 }
 app.post("/search", (req, res) => {
   void handleSearch(req, res);
 });

@@ -3,7 +3,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { googleSearch, getGoogleSearchPageHtml, imageSearch, DEFAULT_STATE_FILE } from "./search.js";
+import { imageSearch, DEFAULT_STATE_FILE } from "./search.js";
+import { search } from "./engines.js";
 import * as fs from "fs";
 import { fileURLToPath } from "url";
 import logger from "./logger.js";
@@ -27,6 +28,7 @@ export function createMcpServer(): McpServer {
 // Structured output schema for the search tool (mirrors SearchResponse)
 const searchOutputSchema = {
   query: z.string(),
+  engine: z.string().optional().describe("Engine that produced these results"),
   results: z
     .array(
       z.object({
@@ -112,6 +114,10 @@ server.registerTool(
     description:
       "Use the Google search engine to query real-time web information, returning search results with titles, links, and snippets. Suitable for scenarios that require the latest information, finding material on a specific topic, researching current events, or verifying facts. Returns structured results including position, domain, snippets, and (when available) an 'answerBox' — Google's featured snippet / direct answer / weather or sports widget / knowledge panel, which is the most authoritative source for real-time facts like scores, weather, and prices — plus 'People also ask' and 'Related searches'.",
     inputSchema: {
+      engine: z
+        .enum(["google", "bing", "duckduckgo", "brave", "all"])
+        .optional()
+        .describe("Search engine to use (default: google). Use others as fallback if Google is blocked. 'all' queries every engine in parallel and merges the results into one deduped list (each result carries a `sources` array)."),
       query: z
         .string()
         .describe(
@@ -134,8 +140,8 @@ server.registerTool(
   },
   async (params) => {
     try {
-      const { query, limit, page, timeout } = params;
-      logger.info({ query, limit, page }, "Performing Google search");
+      const { query, engine, limit, page, timeout } = params;
+      logger.info({ query, engine, limit, page }, "Performing search");
 
       // Shared anti-bot state file (same one the CLI warms). This server can't solve
       // CAPTCHAs, so it relies on this session being warm — run the CLI once to seed it.
@@ -154,9 +160,11 @@ server.registerTool(
         logger.warn(warningMessage);
       }
 
-      // Perform the search. No browser arg: googleSearch launches and closes its
-      // own fresh browser per call (a shared browser gets CAPTCHA'd by Google).
-      const results = await googleSearch(query, {
+      // Multi-engine dispatch (engine selected via the `engine` arg). No shared browser
+      // arg: each call launches and closes its own fresh browser — a long-lived shared
+      // instance reliably gets CAPTCHA'd by Google.
+      const results = await search(query, {
+        engine: engine,
         limit: limit,
         page: page,
         timeout: timeout,

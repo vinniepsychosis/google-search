@@ -9,6 +9,12 @@ export interface SearchResult {
   /** Hostname of the result link, e.g. "example.com" */
   domain: string;
   snippet: string;
+  /**
+   * Which engines surfaced this URL. Only set for aggregated (engine=all)
+   * results; a URL returned by several engines is merged into one entry and
+   * ranked partly by how many engines agreed on it.
+   */
+  sources?: SearchEngine[];
 }
 
 /**
@@ -160,6 +166,8 @@ export interface PaginationInfo {
  */
 export interface SearchResponse {
   query: string;
+  /** Engine that produced these results. */
+  engine?: SearchEngine;
   results: SearchResult[];
   /** Google's answer box / featured snippet / widget, when present (best-effort) */
   answerBox?: AnswerBox;
@@ -173,12 +181,24 @@ export interface SearchResponse {
   relatedSearches?: string[];
   /** Pagination metadata */
   pagination?: PaginationInfo;
+  /** For engine=all: which engines contributed results to this response. */
+  enginesUsed?: SearchEngine[];
+  /** For engine=all: engines that failed (e.g. blocked) and were skipped. */
+  enginesFailed?: { engine: SearchEngine; error: string }[];
 }
+
+/**
+ * Supported search engines. "all" is a meta-engine that queries the real
+ * engines in parallel and merges their results into one deduped ranked list.
+ */
+export type SearchEngine = "google" | "bing" | "duckduckgo" | "brave" | "all";
 
 /**
  * Command line / programmatic options interface
  */
 export interface CommandOptions {
+  /** Search engine to use. Default "google". */
+  engine?: SearchEngine;
   /** Maximum number of results to return (across pages). Default 10. */
   limit?: number;
   /** Starting page (1-based). Default 1. Combined with limit to compute the start offset. */
@@ -188,6 +208,21 @@ export interface CommandOptions {
   stateFile?: string;
   noSaveState?: boolean;
   locale?: string; // Search result language, defaults to Chinese (zh-CN)
+  /**
+   * Opt-in: if a non-Google engine still throws an anti-bot challenge in
+   * headless mode, open a visible browser window for a one-time manual solve.
+   * Default false — the tool stays fully headless and surfaces a challenge as an
+   * error instead of popping a window.
+   */
+  headedSolve?: boolean;
+  /**
+   * Deliberate one-time solve. Skips the doomed headless retries and opens a
+   * headed window immediately so you can clear an *active* challenge (e.g.
+   * Brave's "verify you're not a bot"). The resulting clearance cookie is
+   * persisted to the engine's state file, after which normal headless runs
+   * reuse it. Requires state saving (incompatible with noSaveState).
+   */
+  solveChallenge?: boolean;
 }
 
 /**

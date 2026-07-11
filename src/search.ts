@@ -29,7 +29,7 @@ export const DEFAULT_STATE_FILE = path.join(
 );
 
 // Fingerprint configuration interface
-interface FingerprintConfig {
+export interface FingerprintConfig {
   deviceName: string;
   locale: string;
   timezoneId: string;
@@ -39,7 +39,7 @@ interface FingerprintConfig {
 }
 
 // Saved state file interface
-interface SavedState {
+export interface SavedState {
   fingerprint?: FingerprintConfig;
   googleDomain?: string;
 }
@@ -106,7 +106,8 @@ export function resolveGeoProfile(userLocale?: string): {
   return { locale, timezoneId, acceptLanguage, googleDomain };
 }
 
-function getHostMachineConfig(userLocale?: string): FingerprintConfig {
+// Exported for src/stealth.ts (multi-engine path) to reuse the same fingerprint.
+export function getHostMachineConfig(userLocale?: string): FingerprintConfig {
   // Coherent (language, timezone) from the real runtime — see resolveGeoProfile. The old
   // getTimezoneOffset() heuristic had no branch for UTC+5:30 (India) and several others,
   // so it silently mislabeled them all as Asia/Shanghai.
